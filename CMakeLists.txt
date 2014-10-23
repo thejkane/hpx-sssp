@@ -1,6 +1,8 @@
 # Require a recent version of cmake
 cmake_minimum_required(VERSION 2.8.4 FATAL_ERROR)
 
+SET(HPX_IGNORE_COMPILER_COMPATIBILITY 1)
+
 # This project is C++ based.
 project(your_app CXX)
 
@@ -18,4 +20,5 @@ find_package(HPX REQUIRED)
 add_hpx_executable(dc_sssp
     ESSENTIAL
     SOURCES dc_sssp.cpp
-    HEADERS distributed_control.hpp)
+    HEADERS distributed_control.hpp
+    COMPONENT_DEPENDENCIES iostreams)
