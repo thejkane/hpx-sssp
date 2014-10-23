@@ -82,21 +82,24 @@ public:
 
     std::cout << "Row indices : {";
     // copy raw indices
-    for(int i=0; i < ((vertex_end-vertex_start)+1); ++i) {
+    for(int i=0; i < (vertex_end-vertex_start); ++i) {
       std::cout << row_indices[i] << ", ";
     }
     std::cout << "}" << std::endl;
 
+    int num_edges = row_indices[vertex_end-vertex_start-1] - row_indices[0];
+    std::cout << "Num Edges : " << num_edges << std::endl;
+
     std::cout << "Columns : {";
     // copy columns & weights
-    for(int i=0; i<(row_indices[vertex_end] - row_indices[vertex_start]); ++i) {
+    for(int i=0; i<num_edges; ++i) {
       std::cout << columns[i] << ", ";
     }
     std::cout << "}" << std::endl;
 
     std::cout << "Weights : {";
     // copy columns & weights
-    for(int i=0; i<(row_indices[vertex_end] - row_indices[vertex_start]); ++i) {
+    for(int i=0; i<num_edges; ++i) {
       std::cout << weights[i] << ", ";
     }
     std::cout << "}" << std::endl;
@@ -188,6 +191,12 @@ struct partition : hpx::components::client_base<partition, partition_server> {
 
 
 struct distributed_control {
+  
+  // create a partition client array
+  // creates a partition for each locality
+  typedef std::vector<partition> partition_client_t;
+  partition_client_t partitions;
+
   void partition_graph() {
 
     // TODO : Graph generation
@@ -206,17 +215,27 @@ struct distributed_control {
     std::size_t num_locs = localities.size();
     std::cout << "Number of localities : " << num_locs << std::endl;
 
-
     // equally distribute vertices among localities
     int num_vert_per_local = numvertices / num_locs;
+    int vert_balance = numvertices % num_locs;
 
     for(int i=0; i<num_locs; ++i) {
       int startv = i*num_vert_per_local;
-      int endv = num_vert_per_local+i*num_vert_per_local + 1;
 
+      // if this is last locality add balance vertices to last
+      int endv;
+      if (i == num_locs-1) {
+	endv = num_vert_per_local+i*num_vert_per_local + 1 + vert_balance;
+      } else {
+	endv = num_vert_per_local+i*num_vert_per_local + 1;
+      }
+     
       int starte = rowindices[startv];
       int ende = rowindices[endv-1];
-
+      
+      std::cout << "startv : " << startv << " endv : " << endv
+		<< " starte : " << starte << " ende : " << ende 
+		<< std::endl;
       graph_partition_data pd(startv,
 			      endv);
 
@@ -231,7 +250,32 @@ struct distributed_control {
 	pd.weights.push_back(weights[k]);
       }
 
+      // For debugging
+      //pd.print();
+
+      // Distribute data
+      // To distribute we invoke component client, i.e. partition
+      // and give locality and graph_partition. This operation will 
+      // distribute graph_partition to remote locality
+      std::cout << "Pushing to locality : " << 
+	hpx::naming::get_locality_id_from_id(localities[i]) << std::endl;
       pd.print();
+      partition p(localities[i], pd);
+      partitions.push_back(p);
+    }
+  }
+
+  // This function iterates all partitions (remote & local)
+  // prints partition data
+  void print_all_partitions() {
+    partition_client_t::iterator ite = partitions.begin();
+    for (; ite != partitions.end(); ++ite) {
+      std::cout << "Partition locality : " << 
+	hpx::naming::get_locality_id_from_id((*ite).get_gid()) << std::endl;
+      // What we get from get_data is a future.
+      // We have to call get to get the actual graph_partition_data
+      // and then call print on it
+      (*ite).get_data().get().print();
     }
   }
 };
@@ -247,7 +291,12 @@ int hpx_main(boost::program_options::variables_map& vm) {
     verify = false;
   
   distributed_control dc;
-  dc.partition_graph(); 
+  dc.partition_graph();
+
+  std::cout << "=============================================" << std::endl;
+  std::cout << "=============================================" << std::endl;
+  
+  dc.print_all_partitions();
   
   return hpx::finalize();
 }
