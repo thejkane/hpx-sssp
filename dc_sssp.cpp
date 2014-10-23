@@ -215,7 +215,7 @@ struct distributed_control {
       int endv = num_vert_per_local+i*num_vert_per_local + 1;
 
       int starte = rowindices[startv];
-      int ende = rowindices[endv];
+      int ende = rowindices[endv-1];
 
       graph_partition_data pd(startv,
 			      endv);
