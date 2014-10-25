@@ -20,6 +20,8 @@
 // parameters to new operator
 #define HPX_LIMIT 6
 
+#include <atomic>
+
 #include <hpx/hpx_init.hpp>
 #include <hpx/hpx.hpp>
 
@@ -28,6 +30,7 @@
 #include <boost/shared_array.hpp>
 #include <boost/serialization/vector.hpp>
 
+#include "boost/graph/parallel/thread_support.hpp"
 #include "common_types.hpp"
 
 typedef std::vector<int> graph_array_t;
@@ -256,12 +259,23 @@ public:
     return weights[(e.eid - row_indices[0])];
   }
 
-  vertex_property_t get_vertex_property(vertex_t vid) {
+  vertex_property_t get_vertex_distance(vertex_t vid) {
     return vertex_distances[vid];
   }
 
-  void set_vertex_property(vertex_t vid, vertex_property_t val) {
-    vertex_distances[vid] = val;
+  inline bool set_vertex_distance_atomic(vertex_t vid, 
+				  vertex_property_t new_distance) {
+    int old_dist = vertex_distances[vid], last_old_dist;
+    while (new_distance < old_dist) {
+      last_old_dist = old_dist;
+      old_dist = boost::parallel::val_compare_and_swap
+	(&vertex_distances[vid], old_dist, new_distance);
+      if (last_old_dist == old_dist) {
+	return true;
+      }
+    }
+
+    return false;
   }
 
   boost::uint32_t find_locality_id(vertex_t v, std::size_t num_locs) {
@@ -387,6 +401,43 @@ struct partition_server
     std::cout << "Invoking relax in locality : "
 	      << hpx::naming::get_locality_id_from_id(hpx::find_here())
 	      << std::endl;
+
+    graph_partition_data::OutgoingEdgePair_t pair 
+      = graph_partition.out_going_edges(vd.vertex);
+    graph_partition_data::edge_iterator vebegin = pair.first;
+    graph_partition_data::edge_iterator veend = pair.second;
+
+    for(; vebegin != veend; ++vebegin) {
+      std::cout << "Relaxing - (" << (*vebegin).first << ", " << (*vebegin).second << "), ";
+      HPX_ASSERT(vd.vertex == (*vebegin).first);
+      vertex_t target = (*vebegin).second;
+      
+      // calculate new distance
+      int new_distance = vd.distance + 
+	graph_partition.get_edge_weight(*vebegin);
+
+      // check whether new distance is better than existing
+      if (graph_partition.get_vertex_distance(target) > 
+	  new_distance){
+	// update distance atomically
+	if (graph_partition.set_vertex_distance_atomic
+	    (target, new_distance)){
+	  // returned true. i.e. successfully updated
+	  // time to relax. First find the appropriate
+	  // partition id (i.e component id)
+	  hpx::naming::id_type cid 
+	    = graph_partition.find_component_id(target);
+	  
+	  // spawn a task
+	  // TODO : asynchronously wait till all futures are done
+	    dc_relax_action act;
+	    hpx::future<void> f 
+	      = hpx::async(act, cid, vertex_distance(target, new_distance));
+
+	}
+	
+      }
+    }
   }
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
