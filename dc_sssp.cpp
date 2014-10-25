@@ -12,190 +12,45 @@
 // Description : The Distributed Control based SSSP implementation on HPX 
 //               platform.
 //=============================================================================
-
-// This is needed to increase the number of 
-// parameters to new operator
-#define HPX_LIMIT 6
-
-
-#include <hpx/hpx_init.hpp>
-#include <hpx/hpx.hpp>
-
-#include <boost/format.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/shared_array.hpp>
-#include <boost/serialization/vector.hpp>
-
 #include "distributed_control.hpp"
 
-bool verify = true; // Whether to verify results (i.e. shortest path or not)
+#include <map>
 
-typedef std::vector<int> graph_array_t;
-//=========================================
-// Used to transfer partition information
-// across different localities.
-//=========================================
-struct graph_partition_data {
-  int vertex_start;
-  int vertex_end;
-  graph_array_t row_indices;
-  graph_array_t columns;
-  graph_array_t weights;
+// Whether to verify results (i.e. shortest path or not)
+bool verify = true; 
 
-private:
-  friend class boost::serialization::access;
-  template<class Archive>
-  void serialize(Archive & ar, const unsigned int version) {
-    ar & vertex_start;
-    ar & vertex_end;
-    ar & row_indices;
-    ar & columns;
-    ar & weights;
-  }
-
-public:
-  graph_partition_data() {}
-
-  graph_partition_data(int _vstart, int _vend) : 
-    vertex_start(_vstart), vertex_end(_vend) {}
-
-  graph_partition_data(int _vstart, int _vend,
-		       graph_array_t _ri,
-		       graph_array_t _cl,
-		       graph_array_t _wt) : 
-    vertex_start(_vstart), vertex_end(_vend),
-    row_indices(_ri), columns(_cl),
-    weights(_wt)
-  {}
-
-  // copy constructor
-  graph_partition_data(const graph_partition_data& other):
-    vertex_start(other.vertex_start),
-    vertex_end(other.vertex_end),
-    row_indices(other.row_indices),
-    columns(other.columns),
-    weights(other.weights)
-  {}
-
- void print() {
-    std::cout << "Vertex start : " << vertex_start << " vertex end : " << vertex_end << std::endl;
-
-    std::cout << "Row indices : {";
-    // copy raw indices
-    for(int i=0; i < (vertex_end-vertex_start); ++i) {
-      std::cout << row_indices[i] << ", ";
-    }
-    std::cout << "}" << std::endl;
-
-    int num_edges = row_indices[vertex_end-vertex_start-1] - row_indices[0];
-    std::cout << "Num Edges : " << num_edges << std::endl;
-
-    std::cout << "Columns : {";
-    // copy columns & weights
-    for(int i=0; i<num_edges; ++i) {
-      std::cout << columns[i] << ", ";
-    }
-    std::cout << "}" << std::endl;
-
-    std::cout << "Weights : {";
-    // copy columns & weights
-    for(int i=0; i<num_edges; ++i) {
-      std::cout << weights[i] << ", ";
-    }
-    std::cout << "}" << std::endl;
-  }
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// This is the server side representation of the data. We expose this as a HPX
-// component which allows for it to be created and accessed remotely through
-// a global address (hpx::id_type).
-struct partition_server
-  : hpx::components::simple_component_base<partition_server>
-{
-  // construct new instances
-  partition_server() {}
-
-  partition_server(graph_partition_data const& data)
-    : graph_partition(data)
-  {}
-
-  // Access data. The parameter specifies what part of the data should be
-  // accessed. As long as the result is used locally, no data is copied,
-  // however as soon as the result is requested from another locality only
-  // the minimally required amount of data will go over the wire.
-  graph_partition_data get_data() const
-  {
-    return graph_partition;
-  }
-
-  // Every member function which has to be invoked remotely needs to be
-  // wrapped into a component action. The macro below defines a new type
-  // 'get_data_action' which represents the (possibly remote) member function
-  // partition::get_data().
-  HPX_DEFINE_COMPONENT_CONST_DIRECT_ACTION(partition_server, get_data, get_data_action);
-
-private:
-  graph_partition_data graph_partition;
-};
-
-// The macros below are necessary to generate the code required for exposing
-// our partition type remotely.
-//
-// HPX_REGISTER_MINIMAL_COMPONENT_FACTORY() exposes the component creation
-// through hpx::new_<>().
-typedef hpx::components::simple_component<partition_server> partition_server_type;
-HPX_REGISTER_MINIMAL_COMPONENT_FACTORY(partition_server_type, partition_server);
-
-// HPX_REGISTER_ACTION() exposes the component member function for remote
-// invocation.
-typedef partition_server::get_data_action get_data_action;
-HPX_REGISTER_ACTION(get_data_action);
-
-// TODO encapsulate parameters
-
-///////////////////////////////////////////////////////////////////////////////
-// This is a client side helper class allowing to hide some of the tedious
-// boilerplate.
-struct partition : hpx::components::client_base<partition, partition_server> {
-  typedef hpx::components::client_base<partition, partition_server> base_type;
-
-  partition() {}
-
-  // Create a new component on the locality co-located to the id 'where'. The
-  // new instance will be initialized from the given partition_data.
-  partition(hpx::id_type where, graph_partition_data const& data)
-    : base_type(hpx::new_colocated<partition_server>(where, data))
-  {}
-
-  // Attach a future representing a (possibly remote) partition.
-  partition(hpx::future<hpx::id_type> && id)
-    : base_type(std::move(id))
-  {}
-
-  // Unwrap a future<partition> (a partition already holds a future to the
-  // id of the referenced object, thus unwrapping accesses this inner future).
-  partition(hpx::future<partition> && c)
-    : base_type(std::move(c))
-  {}
-
-  ///////////////////////////////////////////////////////////////////////////
-  // Invoke the (remote) member function which gives us access to the data.
-  // This is a pure helper function hiding the async.
-  hpx::future<graph_partition_data> get_data() const
-  {
-    partition_server::get_data_action act;
-    return hpx::async(act, get_gid());
-  }
-};
 
 
 struct distributed_control {
   
+private:
   // create a partition client array
   // creates a partition for each locality
-  typedef std::vector<partition> partition_client_t;
-  partition_client_t partitions;
+  // map key - locality id, value - remote partition
+  typedef std::map<boost::uint32_t, partition> partition_client_map_t;
+  partition_client_map_t partitions;
+
+  int num_vert_per_local = 0;
+
+  inline boost::uint32_t find_locality_id(vertex_t v,
+					  int num_vertices_per_local) {
+    HPX_ASSERT(num_vertices_per_local != 0);
+
+    std::vector<hpx::naming::id_type> localities =
+      hpx::find_all_localities();
+    std::size_t num_locs = localities.size();
+
+    vertex_t max_partition_vertex 
+      = (num_locs * num_vertices_per_local) - 1;
+
+    if (v > max_partition_vertex)
+      return (num_locs-1);
+    else 
+      return (v / num_vertices_per_local);
+  }
+
+public:
+  void run_chaotice_sssp(vertex_t source);
 
   void partition_graph() {
 
@@ -216,7 +71,7 @@ struct distributed_control {
     std::cout << "Number of localities : " << num_locs << std::endl;
 
     // equally distribute vertices among localities
-    int num_vert_per_local = numvertices / num_locs;
+    num_vert_per_local = numvertices / num_locs;
     int vert_balance = numvertices % num_locs;
 
     for(int i=0; i<num_locs; ++i) {
@@ -237,7 +92,8 @@ struct distributed_control {
 		<< " starte : " << starte << " ende : " << ende 
 		<< std::endl;
       graph_partition_data pd(startv,
-			      endv);
+			      endv,
+			      num_vert_per_local);
 
       // assign row indices
       for (int k=startv; k < endv; ++k) {
@@ -259,26 +115,101 @@ struct distributed_control {
       // distribute graph_partition to remote locality
       std::cout << "Pushing to locality : " << 
 	hpx::naming::get_locality_id_from_id(localities[i]) << std::endl;
-      pd.print();
+      //pd.print();
       partition p(localities[i], pd);
-      partitions.push_back(p);
+      partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
     }
   }
 
   // This function iterates all partitions (remote & local)
   // prints partition data
   void print_all_partitions() {
-    partition_client_t::iterator ite = partitions.begin();
+    partition_client_map_t::iterator ite = partitions.begin();
     for (; ite != partitions.end(); ++ite) {
+      HPX_ASSERT(hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) == (*ite).first);
+
       std::cout << "Partition locality : " << 
-	hpx::naming::get_locality_id_from_id((*ite).get_gid()) << std::endl;
+	hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) << std::endl;
       // What we get from get_data is a future.
       // We have to call get to get the actual graph_partition_data
       // and then call print on it
-      (*ite).get_data().get().print();
+      graph_partition_data pd = (*ite).second.get_data().get();
+      //pd.print();
+
+      { 
+	// iterate vertices
+	std::cout << "Vertices {";
+	graph_partition_data::vertex_iterator vbegin = pd.vertices_begin();
+	graph_partition_data::vertex_iterator vend = pd.vertices_end();
+	for (; vbegin != vend; ++vbegin) {
+	  std::cout << *vbegin << ", ";
+	}
+	std::cout << "}" << std::endl;
+      }
+
+      {
+	// iterate edges
+	graph_partition_data::edge_iterator ebegin = pd.edges_begin();
+	graph_partition_data::edge_iterator eend = pd.edges_end();
+
+	std::cout << "Edges {";
+	for(; ebegin != eend; ++ebegin) {
+	  std::cout << "[(" << (*ebegin).first << ", "
+		    << (*ebegin).second << ")-" << (*ebegin).eid 
+		    << "-" << pd.get_edge_weight(*ebegin)
+		    << "], ";
+	}
+	std::cout << "}" << std::endl;
+	std::cout << std::endl;
+      }
+
+      // traversing outgoing edges of vertices
+      { 
+	//typedef std::pair<graph_partition_data::edge_iterator, 
+	//		  graph_partition_data::edge_iterator> OutgoingEdgePair_t;
+
+	// iterate vertices
+	graph_partition_data::vertex_iterator vbegin = pd.vertices_begin();
+	graph_partition_data::vertex_iterator vend = pd.vertices_end();
+	for (; vbegin != vend; ++vbegin) {
+	  std::cout << "Vertex : " << *vbegin << " - Edges : {";
+
+	  graph_partition_data::OutgoingEdgePair_t pair = pd.out_going_edges(*vbegin);
+	  graph_partition_data::edge_iterator vebegin = pair.first;
+	  graph_partition_data::edge_iterator veend = pair.second;
+	  for(; vebegin != veend; ++vebegin) {
+	    std::cout << "(" << (*vebegin).first << ", " << (*vebegin).second << "), ";
+	  }
+	  std::cout << "}" << std::endl;
+	}
+      }
     }
   }
 };
+
+//HPX_PLAIN_ACTION(distributed_control::relax, dc_relax_action);
+
+void distributed_control::run_chaotice_sssp(vertex_t source) {
+  // Find the locality of the source
+  boost::uint32_t locality = find_locality_id(source, 
+					      num_vert_per_local);
+  vertex_distance vd(source, 0);
+
+  // The locality of the source might be different from
+  // root locality. Therefore we need to bind and invoke the
+  // function.
+  // Get the partition the belongs to locality
+  partition_client_map_t::iterator iteFind = partitions.find(locality);
+  HPX_ASSERT(iteFind != partitions.end());
+
+  // Time to invoke relax for source
+  partition_relax_action act;
+  hpx::future<void> f = hpx::async(act, (*iteFind).second.get_gid(), vd);
+  //				   vd, (*iteFind).second);
+
+  f.get(); // wait till relax is done
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // Note : Irrespective of number of localities we are running, hpx_main will only
@@ -296,7 +227,8 @@ int hpx_main(boost::program_options::variables_map& vm) {
   std::cout << "=============================================" << std::endl;
   std::cout << "=============================================" << std::endl;
   
-  dc.print_all_partitions();
+  //  dc.print_all_partitions();
+  dc.run_chaotice_sssp(5);
   
   return hpx::finalize();
 }
