@@ -177,8 +177,7 @@ public:
   };
 
   typedef std::pair<graph_partition_data::edge_iterator, 
-		  graph_partition_data::edge_iterator> OutgoingEdgePair_t;
-
+		    graph_partition_data::edge_iterator> OutgoingEdgePair_t;
 
   graph_partition_data() {}
 
@@ -239,6 +238,8 @@ public:
 
   // Get a start iterator to edges going out from vertex v
   OutgoingEdgePair_t out_going_edges(vertex_t v) {
+    std::cout << "v-" << v << " start-" << vertex_start << " end-"
+	      << vertex_end << std::endl;
     assert(vertex_start <= v && v < vertex_end);
     vertex_t local_v = v - vertex_start;
 
@@ -264,7 +265,7 @@ public:
   }
 
   inline bool set_vertex_distance_atomic(vertex_t vid, 
-				  vertex_property_t new_distance) {
+					 vertex_property_t new_distance) {
     int old_dist = vertex_distances[vid], last_old_dist;
     while (new_distance < old_dist) {
       last_old_dist = old_dist;
@@ -305,11 +306,10 @@ public:
     }
     
     HPX_ASSERT(false); // should not come here
-
   }
 
 
- void print() {
+  void print() {
     std::cout << "Vertex start : " 
 	      << vertex_start << " vertex end : " 
 	      << vertex_end << std::endl;
@@ -378,6 +378,11 @@ struct partition_server
     : graph_partition(data)
   {}
 
+  partition_server(partition_server const& ps)
+    : graph_partition(ps.graph_partition)
+  {}
+
+
   // Access data. The parameter specifies what part of the data should be
   // accessed. As long as the result is used locally, no data is copied,
   // however as soon as the result is requested from another locality only
@@ -400,7 +405,13 @@ struct partition_server
   void relax(vertex_distance vd) {
     std::cout << "Invoking relax in locality : "
 	      << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	      << " for vertex : " << vd.vertex
+	      << " and distance : " << vd.distance
 	      << std::endl;
+
+    graph_partition.print();
+    // Populate all future to a vector
+    std::vector< hpx::future <void> > futures;
 
     graph_partition_data::OutgoingEdgePair_t pair 
       = graph_partition.out_going_edges(vd.vertex);
@@ -422,27 +433,31 @@ struct partition_server
 	// update distance atomically
 	if (graph_partition.set_vertex_distance_atomic
 	    (target, new_distance)){
-	  // returned true. i.e. successfully updated
+	  // returned true. i.e. successfully updated.
 	  // time to relax. First find the appropriate
 	  // partition id (i.e component id)
 	  hpx::naming::id_type cid 
 	    = graph_partition.find_component_id(target);
+
+	  //	  std::cout << "cid - " << cid << " findhere - " << hpx::find_here()
+	  //	    << std::endl;
 	  
 	  // spawn a task
 	  // TODO : asynchronously wait till all futures are done
-	    dc_relax_action act;
-	    hpx::future<void> f 
-	      = hpx::async(act, cid, vertex_distance(target, new_distance));
-
+	  dc_relax_action act;
+	  futures.push_back(hpx::async(act, 
+				       cid, 
+				       vertex_distance(target, 
+						       new_distance)));
 	}
-	
       }
     }
+
+    hpx::wait_all(futures);
   }
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
-
 
 private:
   graph_partition_data graph_partition;

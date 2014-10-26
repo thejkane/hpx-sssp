@@ -14,6 +14,7 @@
 //=============================================================================
 #include "distributed_control.hpp"
 
+#include <limits>
 #include <map>
 
 // Whether to verify results (i.e. shortest path or not)
@@ -52,7 +53,7 @@ private:
 public:
   void run_chaotice_sssp(vertex_t source);
 
-  void partition_graph() {
+  void partition_graph(vertex_t source) {
 
     // TODO : Graph generation
     // Let's create 2 arrays 2 represent row_indices and columns
@@ -95,6 +96,11 @@ public:
 			      endv,
 			      num_vert_per_local);
 
+      pd.vertex_distances.resize(endv-startv);
+      pd.vertex_distances.assign((endv-startv), 
+				 std::numeric_limits<vertex_t>::max());
+      pd.vertex_distances[source] = 0;
+      
       // assign row indices
       for (int k=startv; k < endv; ++k) {
 	pd.row_indices.push_back(rowindices[k]);
@@ -204,10 +210,9 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
 
   // Time to invoke relax for source
   partition_relax_action act;
-  hpx::future<void> f = hpx::async(act, (*iteFind).second.get_gid(), vd);
-  //				   vd, (*iteFind).second);
+  // call synchronously
+  act((*iteFind).second.get_gid(), vd);
 
-  f.get(); // wait till relax is done
 }
 
 
@@ -220,15 +225,16 @@ int hpx_main(boost::program_options::variables_map& vm) {
 
   if (!vm.count("verify"))
     verify = false;
-  
+
+  vertex_t source = 0;
   distributed_control dc;
-  dc.partition_graph();
+  dc.partition_graph(source);
 
   std::cout << "=============================================" << std::endl;
   std::cout << "=============================================" << std::endl;
   
   //  dc.print_all_partitions();
-  dc.run_chaotice_sssp(5);
+  dc.run_chaotice_sssp(source);
   
   return hpx::finalize();
 }
