@@ -28,7 +28,6 @@ private:
   // create a partition client array
   // creates a partition for each locality
   // map key - locality id, value - remote partition
-  typedef std::map<boost::uint32_t, partition> partition_client_map_t;
   partition_client_map_t partitions;
 
   int num_vert_per_local = 0;
@@ -211,8 +210,65 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   // Time to invoke relax for source
   partition_relax_action act;
   // call synchronously
-  act((*iteFind).second.get_gid(), vd);
+  act((*iteFind).second.get_gid(), vd, partitions);
 
+}
+
+
+
+void partition_server::relax(const vertex_distance& vd, 
+			     const partition_client_map_t& pmap) {
+
+  std::cout << "Invoking relax in locality : "
+	    << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	    << " for vertex : " << vd.vertex
+	    << " and distance : " << vd.distance
+	    << std::endl;
+
+  graph_partition.print();
+  // Populate all future to a vector
+  std::vector< hpx::future <void> > futures;
+
+  graph_partition_data::OutgoingEdgePair_t pair 
+    = graph_partition.out_going_edges(vd.vertex);
+  graph_partition_data::edge_iterator vebegin = pair.first;
+  graph_partition_data::edge_iterator veend = pair.second;
+
+  for(; vebegin != veend; ++vebegin) {
+    std::cout << "Relaxing - (" << (*vebegin).first << ", " << (*vebegin).second << "), ";
+    HPX_ASSERT(vd.vertex == (*vebegin).first);
+    vertex_t target = (*vebegin).second;
+      
+    // calculate new distance
+    int new_distance = vd.distance + 
+      graph_partition.get_edge_weight(*vebegin);
+
+    // check whether new distance is better than existing
+    if (graph_partition.get_vertex_distance(target) > 
+	new_distance){
+      // update distance atomically
+      if (graph_partition.set_vertex_distance_atomic
+	  (target, new_distance)){
+	// returned true. i.e. successfully updated.
+	// time to relax. First find the appropriate
+	// partition id (i.ee component id)
+	boost::uint32_t target_locality = graph_partition.find_locality_id(target);
+
+	partition_client_map_t::const_iterator iteClient =
+	  pmap.find(target_locality);
+	HPX_ASSERT(iteClient != pmap.end());
+	  
+	// spawn a task
+	// TODO : asynchronously wait till all futures are done
+	futures.push_back((*iteClient).
+			  second.relax(vertex_distance(target, 
+						       new_distance),
+				       pmap));
+      }
+    }
+  }
+
+  hpx::wait_all(futures);
 }
 
 
@@ -238,6 +294,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
   
   return hpx::finalize();
 }
+
 
 int main(int argc, char* argv[])
 {
