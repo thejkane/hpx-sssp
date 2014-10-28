@@ -411,21 +411,17 @@ struct partition_server
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
-  void relax(const vertex_distance& vd, const partition_client_map_t& pmap);
+  // T = vector <  future <void> >
+  template <typename T>
+  T relax(const vertex_distance& vd, const partition_client_map_t& pmap);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
 
   // wait till all futures complete their work
   std::size_t flush_tasks() {
-    //    mutex_type::scoped_lock l(mtx);
-
-    std::size_t qsize = futures.size();
-    std::cout << "flush task : " << qsize << std::endl;
-    hpx::wait_all(futures);
-    futures.clear(); // TODO check whether we need to do any de-allocation
-
-    return qsize;
+    // TODO
+    return 0;
   }
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
@@ -433,8 +429,6 @@ struct partition_server
 
 private:
   graph_partition_data graph_partition;
-  future_collection_t futures; // collect all locally spawned future tasks
-  mutex_type mtx;
 };
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
@@ -497,7 +491,9 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   ///////////////////////////////////////////////////////////////////////////
   // Invoke remote relax
   ///////////////////////////////////////////////////////////////////////////
-  hpx::future<void> relax(vertex_distance const& vd,
+  // here T = vector <future<void>>
+  template <typename T>
+  hpx::future<T> relax(vertex_distance const& vd,
 			  const partition_client_map_t& pmap) const {
     partition_server::dc_relax_action act;
     return hpx::async(act, get_gid(), vd, pmap);
