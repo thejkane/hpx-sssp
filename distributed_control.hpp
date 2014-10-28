@@ -241,8 +241,8 @@ public:
 
   // Get a start iterator to edges going out from vertex v
   OutgoingEdgePair_t out_going_edges(vertex_t v) {
-    std::cout << "v-" << v << " start-" << vertex_start << " end-"
-	      << vertex_end << std::endl;
+    //    std::cout << "v-" << v << " start-" << vertex_start << " end-"
+    //	      << vertex_end << std::endl;
     assert(vertex_start <= v && v < vertex_end);
     vertex_t local_v = v - vertex_start;
 

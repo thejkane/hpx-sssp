@@ -53,7 +53,6 @@ public:
   void run_chaotice_sssp(vertex_t source);
 
   void partition_graph(vertex_t source) {
-
     // TODO : Graph generation
     // Let's create 2 arrays 2 represent row_indices and columns
     // Then lets partition those 2 arrays - These 2 arrays represent the graph
@@ -62,7 +61,8 @@ public:
 
     int rowindices[] = {0, 3, 6, 10, 14, 17, 20, 22}; // size of row indices array = vertices + 1
     int columns[] = {1, 2, 4, 0, 2, 3, 0, 1, 3, 4, 1, 2, 5, 6, 0, 2, 5, 3, 4, 6, 3, 5};
-    int weights[] = {5, 10, 8, 20, 12, 3, 10, 15, 3, 6, 10, 22, 35, 16, 20, 32, 25, 23, 34, 26, 33, 15};
+    //    int weights[] = {5, 10, 8, 20, 12, 3, 10, 15, 3, 6, 10, 22, 35, 16, 20, 32, 25, 23, 34, 26, 33, 15};
+    int weights[] = {20, 10, 8, 20, 12, 10, 10, 12, 3, 32, 10, 3, 35, 16, 8, 32, 34, 35, 34, 15, 16, 15};
     // TODO : Permute graph
 
     std::vector<hpx::naming::id_type> localities =
@@ -123,6 +123,26 @@ public:
       //pd.print();
       partition p(localities[i], pd);
       partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
+    }
+  }
+
+  void print_results() {
+    std::cout << "===================== Printing Results ==============================" << std::endl;
+    partition_client_map_t::iterator ite = partitions.begin();
+    for (; ite != partitions.end(); ++ite) {
+      std::cout << "Partition locality : " << 
+	hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) << std::endl;
+      // What we get from get_data is a future.
+      // We have to call get to get the actual graph_partition_data
+      // and then call print on it
+      graph_partition_data pd = (*ite).second.get_data().get();
+
+      int num_local_verts = (pd.vertex_end - pd.vertex_start) - 1;
+      for(int i=0; i < num_local_verts; ++i) {
+	std::cout << "vertex - " << (pd.vertex_start + i)
+		  << " distance - " << pd.vertex_distances[i]
+		  << std::endl;
+      }
     }
   }
 
@@ -198,6 +218,7 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   // Find the locality of the source
   boost::uint32_t locality = find_locality_id(source, 
 					      num_vert_per_local);
+  // set distance to 0
   vertex_distance vd(source, 0);
 
   // The locality of the source might be different from
@@ -207,15 +228,22 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   partition_client_map_t::iterator iteFind = partitions.find(locality);
   HPX_ASSERT(iteFind != partitions.end());
 
-  // Time to invoke relax for source
-  partition_relax_action act;
-  // call synchronously
-  act((*iteFind).second.get_gid(), vd, partitions);
+  // relax source vertex
+  hpx::future<void> f = (*iteFind).second.relax(vd, partitions);
+  f.get();
+
+  print_results();
 
 }
 
-
-
+//======================================================
+// The actual relax code. For each adjacent edge we
+// calculate the new distance and compare against
+// existing distance in distance map. If distance is 
+// better we update distance map with new distance
+// and relax all adjacent edges with new distance.
+// Updates to distance map are atomic.
+//======================================================
 void partition_server::relax(const vertex_distance& vd, 
 			     const partition_client_map_t& pmap) {
 
@@ -225,7 +253,7 @@ void partition_server::relax(const vertex_distance& vd,
 	    << " and distance : " << vd.distance
 	    << std::endl;
 
-  graph_partition.print();
+  // graph_partition.print();
   // Populate all future to a vector
   std::vector< hpx::future <void> > futures;
 
