@@ -411,9 +411,7 @@ struct partition_server
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
-  // T = vector <  future <void> >
-  template <typename T>
-  T relax(const vertex_distance& vd, const partition_client_map_t& pmap);
+  void relax(const vertex_distance& vd, const partition_client_map_t& pmap);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
@@ -491,9 +489,7 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   ///////////////////////////////////////////////////////////////////////////
   // Invoke remote relax
   ///////////////////////////////////////////////////////////////////////////
-  // here T = vector <future<void>>
-  template <typename T>
-  hpx::future<T> relax(vertex_distance const& vd,
+  hpx::future<void> relax(vertex_distance const& vd,
 			  const partition_client_map_t& pmap) const {
     partition_server::dc_relax_action act;
     return hpx::async(act, get_gid(), vd, pmap);
