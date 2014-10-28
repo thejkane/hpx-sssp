@@ -13,7 +13,9 @@
 //               platform.
 //=============================================================================
 #include "distributed_control.hpp"
-
+#include <iostream>       // std::cout, std::endl
+#include <thread>         // std::this_thread::sleep_for
+#include <chrono>
 #include <limits>
 #include <map>
 
@@ -228,9 +230,44 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   partition_client_map_t::iterator iteFind = partitions.find(locality);
   HPX_ASSERT(iteFind != partitions.end());
 
+  future_collection_t futures;
   // relax source vertex
   hpx::future<void> f = (*iteFind).second.relax(vd, partitions);
   f.get();
+  
+  // Termination
+  partition_client_map_t::iterator ite = partitions.begin();
+  bool termination = false;
+  bool did_break = false;
+  int term_iter_count = 0;
+
+  //  std::this_thread::sleep_for (std::chrono::seconds(10));
+  
+  while(!termination) {
+    for(; ite != partitions.end(); ++ite) {
+      std::size_t elements = (*ite).second.flush();
+      if (elements > 0) {
+	// not yet good for termination
+	did_break = true;
+	break;
+      }
+    }
+    
+    if(did_break) {
+      // not yet good for termination
+      did_break = false;
+      term_iter_count = 0;
+      continue;
+    } else if (term_iter_count == 10) {
+      // good for termination
+      // all futures are empty and went through twice to check future queues
+      termination = true;
+    } else {
+      ++term_iter_count;
+    }
+  }
+
+  hpx::wait_all(futures);
 
   print_results();
 
@@ -245,7 +282,7 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
 // Updates to distance map are atomic.
 //======================================================
 void partition_server::relax(const vertex_distance& vd, 
-			     const partition_client_map_t& pmap) {
+					    const partition_client_map_t& pmap) {
 
   std::cout << "Invoking relax in locality : "
 	    << hpx::naming::get_locality_id_from_id(hpx::find_here())
@@ -255,7 +292,7 @@ void partition_server::relax(const vertex_distance& vd,
 
   // graph_partition.print();
   // Populate all future to a vector
-  std::vector< hpx::future <void> > futures;
+  //  future_collection_t futures(std::move(pfutures));
 
   graph_partition_data::OutgoingEdgePair_t pair 
     = graph_partition.out_going_edges(vd.vertex);
@@ -285,18 +322,22 @@ void partition_server::relax(const vertex_distance& vd,
 	partition_client_map_t::const_iterator iteClient =
 	  pmap.find(target_locality);
 	HPX_ASSERT(iteClient != pmap.end());
-	  
+
 	// spawn a task
 	// TODO : asynchronously wait till all futures are done
-	futures.push_back((*iteClient).
-			  second.relax(vertex_distance(target, 
-						       new_distance),
-				       pmap));
+	{
+	  //	  mutex_type::scoped_lock l(mtx);
+	  futures.push_back((*iteClient).second.relax(vertex_distance(target, 
+								      new_distance),
+						      pmap));
+	}
       }
     }
   }
+  // return futures;
 
-  hpx::wait_all(futures);
+
+  //  hpx::wait_all(futures);
 }
 
 

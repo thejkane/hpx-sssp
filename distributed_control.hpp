@@ -371,6 +371,8 @@ private:
 };
 
 
+typedef std::vector< hpx::future <void> > future_collection_t;
+typedef hpx::lcos::local::spinlock mutex_type;
 ///////////////////////////////////////////////////////////////////////////////
 // This is the server side representation of the data. We expose this as a HPX
 // component which allows for it to be created and accessed remotely through
@@ -414,11 +416,29 @@ struct partition_server
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
 
+  // wait till all futures complete their work
+  std::size_t flush_tasks() {
+    //    mutex_type::scoped_lock l(mtx);
+
+    std::size_t qsize = futures.size();
+    std::cout << "flush task : " << qsize << std::endl;
+    hpx::wait_all(futures);
+    futures.clear(); // TODO check whether we need to do any de-allocation
+
+    return qsize;
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
+			      dc_flush_action);
+
 private:
   graph_partition_data graph_partition;
+  future_collection_t futures; // collect all locally spawned future tasks
+  mutex_type mtx;
 };
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
 
 // The macros below are necessary to generate the code required for exposing
 // our partition type remotely.
@@ -435,6 +455,10 @@ HPX_REGISTER_ACTION(get_data_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
+
+typedef partition_server::dc_flush_action partition_flush_action;
+HPX_REGISTER_ACTION(partition_flush_action);
+
 // TODO encapsulate parameters
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -477,6 +501,11 @@ struct partition : hpx::components::client_base<partition, partition_server> {
 			  const partition_client_map_t& pmap) const {
     partition_server::dc_relax_action act;
     return hpx::async(act, get_gid(), vd, pmap);
+  }
+
+  std::size_t flush() const {
+    partition_server::dc_flush_action act;
+    return hpx::async(act, get_gid()).get();
   }
 };
 
