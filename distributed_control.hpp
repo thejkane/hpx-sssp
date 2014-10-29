@@ -264,16 +264,23 @@ public:
   }
 
   vertex_property_t get_vertex_distance(vertex_t vid) {
-    return vertex_distances[vid];
+    return vertex_distances[vid-vertex_start];
   }
 
   inline bool set_vertex_distance_atomic(vertex_t vid, 
 					 vertex_property_t new_distance) {
-    int old_dist = vertex_distances[vid], last_old_dist;
+
+    std::cout << "vid - " << vid << " start - " << vertex_start
+	      << " end - " << vertex_end << std::endl;
+    HPX_ASSERT(vertex_start <= vid && vid < vertex_end);
+
+    vertex_t localvid = vid - vertex_start;
+
+    int old_dist = vertex_distances[localvid], last_old_dist;
     while (new_distance < old_dist) {
       last_old_dist = old_dist;
       old_dist = boost::parallel::val_compare_and_swap
-	(&vertex_distances[vid], old_dist, new_distance);
+	(&vertex_distances[localvid], old_dist, new_distance);
       if (last_old_dist == old_dist) {
 	return true;
       }
@@ -411,7 +418,7 @@ struct partition_server
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
-  void relax(const vertex_distance& vd, const partition_client_map_t& pmap);
+  hpx::future<void> relax(const vertex_distance& vd, const partition_client_map_t& pmap);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);

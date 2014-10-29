@@ -98,7 +98,8 @@ public:
       pd.vertex_distances.resize(endv-startv);
       pd.vertex_distances.assign((endv-startv), 
 				 std::numeric_limits<vertex_t>::max());
-      pd.vertex_distances[source] = 0;
+      //      pd.vertex_distances[source] = 0;
+     
       
       // assign row indices
       for (int k=startv; k < endv; ++k) {
@@ -246,7 +247,7 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
 // and relax all adjacent edges with new distance.
 // Updates to distance map are atomic.
 //======================================================
-void partition_server::relax(const vertex_distance& vd,
+hpx::future<void> partition_server::relax(const vertex_distance& vd,
 			     const partition_client_map_t& pmap) {
 
   std::cout << "Invoking relax in locality : "
@@ -259,29 +260,32 @@ void partition_server::relax(const vertex_distance& vd,
   // Populate all future to a vector
   future_collection_t futures;
 
-  graph_partition_data::OutgoingEdgePair_t pair 
-    = graph_partition.out_going_edges(vd.vertex);
-  graph_partition_data::edge_iterator vebegin = pair.first;
-  graph_partition_data::edge_iterator veend = pair.second;
+  std::cout << "v - " << vd.vertex << " dis - " << vd.distance << " stored distance - "
+	    << graph_partition.get_vertex_distance(vd.vertex) << std::endl;
+  // check whether new distance is better than existing
+  if (graph_partition.get_vertex_distance(vd.vertex) > 
+      vd.distance){
+    // update distance atomically
+    if (graph_partition.set_vertex_distance_atomic
+	(vd.vertex, vd.distance)){
+      // returned true. i.e. successfully updated.
+      // time to relax. First find the appropriate
+      // partition id (i.ee component id)
 
-  for(; vebegin != veend; ++vebegin) {
-    std::cout << "Relaxing - (" << (*vebegin).first << ", " << (*vebegin).second << "), ";
-    HPX_ASSERT(vd.vertex == (*vebegin).first);
-    vertex_t target = (*vebegin).second;
+      graph_partition_data::OutgoingEdgePair_t pair 
+	= graph_partition.out_going_edges(vd.vertex);
+      graph_partition_data::edge_iterator vebegin = pair.first;
+      graph_partition_data::edge_iterator veend = pair.second;
+
+      for(; vebegin != veend; ++vebegin) {
+	std::cout << "Relaxing - (" << (*vebegin).first << ", " << (*vebegin).second << "), ";
+	HPX_ASSERT(vd.vertex == (*vebegin).first);
+	vertex_t target = (*vebegin).second;
       
-    // calculate new distance
-    int new_distance = vd.distance + 
-      graph_partition.get_edge_weight(*vebegin);
+	// calculate new distance
+	int new_distance = vd.distance + 
+	  graph_partition.get_edge_weight(*vebegin);
 
-    // check whether new distance is better than existing
-    if (graph_partition.get_vertex_distance(target) > 
-	new_distance){
-      // update distance atomically
-      if (graph_partition.set_vertex_distance_atomic
-	  (target, new_distance)){
-	// returned true. i.e. successfully updated.
-	// time to relax. First find the appropriate
-	// partition id (i.ee component id)
 	boost::uint32_t target_locality = graph_partition.find_locality_id(target);
 
 	partition_client_map_t::const_iterator iteClient =
@@ -289,14 +293,13 @@ void partition_server::relax(const vertex_distance& vd,
 	HPX_ASSERT(iteClient != pmap.end());
 
 	futures.push_back((*iteClient).second.relax(vertex_distance(target, 
-								     new_distance),
+								    new_distance),
 						    pmap));
-
       }
     }
   }
 
-  hpx::wait_all(futures);
+  return hpx::when_all(futures);
 }
 
 
