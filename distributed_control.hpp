@@ -21,14 +21,20 @@
 #define HPX_LIMIT 6
 
 #include <atomic>
+#include <queue>
 
 #include <hpx/hpx_init.hpp>
 #include <hpx/hpx.hpp>
+#include <hpx/lcos/reduce.hpp>
 
 #include <boost/format.hpp>
 #include <boost/cstdint.hpp>
 #include <boost/shared_array.hpp>
 #include <boost/serialization/vector.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/thread/locks.hpp>
+#include <boost/thread/mutex.hpp>
 
 #include "boost/graph/parallel/thread_support.hpp"
 #include "common_types.hpp"
@@ -37,6 +43,53 @@ struct partition;
 typedef std::map<boost::uint32_t, partition> partition_client_map_t;
 
 typedef std::vector<int> graph_array_t;
+
+//====================================================================//
+// Vertex distance type
+struct vertex_distance {
+  vertex_t vertex;
+  vertex_property_t distance;
+
+  vertex_distance(const vertex_distance& other):
+    vertex(other.vertex), distance(other.distance)
+  {}
+
+  vertex_distance(vertex_t v, vertex_property_t d) : vertex(v),
+						     distance(d)
+  {}
+
+  vertex_distance():vertex(0),distance(0)
+  {}
+
+private:
+  // Serialization support: even if all of the code below runs on one
+  // locality only, we need to provide an (empty) implementation for the
+  // serialization as all arguments passed to actions have to support this.
+  friend class boost::serialization::access;
+
+  template <typename Archive>
+  void serialize(Archive& ar, const unsigned int version) {
+    ar & vertex & distance;
+  }
+};
+
+// Comparer for priority queue
+struct default_comparer {
+  bool operator()(const vertex_distance& vd1, const vertex_distance& vd2) {
+    return vd1.distance > vd2.distance;
+  }
+};
+
+
+struct dc_priority_queue;
+// Priority queue type
+typedef std::priority_queue<vertex_distance, 
+			    std::vector<vertex_distance>, default_comparer > priority_q_t;
+// All priority queues
+typedef std::vector<dc_priority_queue> all_q_t;
+//====================================================================//
+
+
 //=========================================
 // Used to transfer partition information
 // across different localities. This class represent
@@ -46,8 +99,14 @@ typedef std::vector<int> graph_array_t;
 struct graph_partition_data {
   int vertex_start;
   int vertex_end;
-  int number_vertices_per_locality; // This is needed to calculate
+
+  // This is needed to calculate
   // the index of partition particulat vertex belongs
+  int number_vertices_per_locality; 
+  
+  // Number of queues to create
+  int num_queues;
+
   graph_array_t row_indices;
   graph_array_t columns;
   graph_array_t weights;
@@ -60,6 +119,7 @@ private:
     ar & vertex_start;
     ar & vertex_end;
     ar & number_vertices_per_locality;
+    ar & num_queues;
     ar & row_indices;
     ar & columns;
     ar & weights;
@@ -186,15 +246,18 @@ public:
 
   graph_partition_data(int _vstart, 
 		       int _vend, 
-		       int vert_loc) : 
+		       int vert_loc,
+		       int num_q) : 
     vertex_start(_vstart), 
     vertex_end(_vend),
-    number_vertices_per_locality(vert_loc){
+    number_vertices_per_locality(vert_loc),
+    num_queues(num_q) {
   }
 
   graph_partition_data(int _vstart, 
 		       int _vend,
 		       int vert_loc,
+		       int num_q,
 		       const graph_array_t& _ri,
 		       const graph_array_t& _cl,
 		       const graph_array_t& _wt,
@@ -202,6 +265,7 @@ public:
     vertex_start(_vstart), 
     vertex_end(_vend),
     number_vertices_per_locality(vert_loc),
+    num_queues(num_q),
     row_indices(_ri), 
     columns(_cl),
     weights(_wt), 
@@ -213,6 +277,7 @@ public:
     vertex_start(other.vertex_start),
     vertex_end(other.vertex_end),
     number_vertices_per_locality(other.number_vertices_per_locality),
+    num_queues(other.num_queues),
     row_indices(other.row_indices),
     columns(other.columns),
     weights(other.weights),
@@ -354,33 +419,63 @@ public:
   }
 };
 
-struct vertex_distance {
-  vertex_t vertex;
-  vertex_property_t distance;
+typedef std::vector< hpx::future <void> > future_collection_t;
+typedef hpx::lcos::local::spinlock mutex_type;
 
-  vertex_distance(vertex_t v, vertex_property_t d) : vertex(v),
-						     distance(d)
+//==========================================//
+// send_count - stores the number of messages
+// sent through flush_task
+// receive_count - stores the number of messages
+// received through relax
+// these are useful for termination.
+//==========================================//  
+std::atomic_int_fast64_t receive_count(0);
+std::atomic_int_fast64_t send_count(0); // Source does not send a message
+
+///////////////////////////////////////////////////////////////////////////////
+// Represents a single priority queue
+///////////////////////////////////////////////////////////////////////////////
+struct dc_priority_queue {
+  
+  dc_priority_queue():termination(false), q_empty(false){}
+
+  dc_priority_queue(const dc_priority_queue& other):
+    termination(other.termination),
+    pq(other.pq)
   {}
 
-  vertex_distance():vertex(0),distance(0)
-  {}
+  void push(const vertex_distance& vd) {
+    // lock the queue and insert element
+    {
+      boost::mutex::scoped_lock scopedLock(mutex);
+      pq.push(vd);
+    }
+
+    // notify waiting threads
+    cv.notify_all();
+  }
+
+  void handle_queue(const partition_client_map_t& pmap,
+		    graph_partition_data& graph_partition);
+
+  // Terminates the algorithms
+  void terminate() {
+    termination = true;
+    cv.notify_all();
+  }
 
 private:
-  // Serialization support: even if all of the code below runs on one
-  // locality only, we need to provide an (empty) implementation for the
-  // serialization as all arguments passed to actions have to support this.
-  friend class boost::serialization::access;
+  bool termination;
+  priority_q_t pq;
+  hpx::lcos::local::condition_variable cv;
+  boost::mutex mutex;
 
-  template <typename Archive>
-  void serialize(Archive& ar, const unsigned int version) {
-    ar & vertex & distance;
-  }
+public:
+  std::atomic_bool q_empty;
+
 };
 
 
-typedef std::vector< hpx::future <void> > future_collection_t;
-typedef hpx::lcos::local::spinlock mutex_type;
-///////////////////////////////////////////////////////////////////////////////
 // This is the server side representation of the data. We expose this as a HPX
 // component which allows for it to be created and accessed remotely through
 // a global address (hpx::id_type).
@@ -391,12 +486,16 @@ struct partition_server
   partition_server() {}
 
   partition_server(graph_partition_data const& data)
-    : graph_partition(data)
-  {}
+    : graph_partition(data), termination(false){
+    
+    init();
+  }
 
   partition_server(partition_server const& ps)
-    : graph_partition(ps.graph_partition)
-  {}
+    : graph_partition(ps.graph_partition), termination(false) {
+
+    init();
+  }
 
 
   // Access data. The parameter specifies what part of the data should be
@@ -418,26 +517,92 @@ struct partition_server
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
-  hpx::future<void> relax(const vertex_distance& vd, const partition_client_map_t& pmap);
+  void relax(const vertex_distance& vd, const partition_client_map_t& pmap);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
 
+  //==============================================================
   // wait till all futures complete their work
-  std::size_t flush_tasks() {
-    // TODO
-    return 0;
-  }
+  // idx is the queue index to work on
+  //==============================================================
+  void flush_tasks(int idx,
+		   const partition_client_map_t& pmap);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
 			      dc_flush_action);
 
+  void terminate() {
+    for(int i=0; i<graph_partition.num_queues; ++i) {
+      buckets[i].terminate();
+    }
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, terminate,
+			      dc_terminate_action);
+
+
+  // reduction action for total_msg_difference
+  //  HPX_DEFINE_COMPONENT_ACTION(partition_server, total_msg_difference,
+  //			      tot_msg_diff_action);
+
 private:
   graph_partition_data graph_partition;
+  
+  //==========================================//
+  // Stores all priority queues
+  //==========================================//
+  all_q_t buckets;
+
+  //==========================================//
+  // true - termination started
+  // false - termination not started
+  //==========================================//  
+  bool termination;
+
+  //==========================================//
+  // To select a pq randomly
+  //==========================================//
+  boost::random::mt19937 gen;
+  
+  // Initializes thread queues
+  void init() {
+    
+    receive_count = 0;
+
+    // create queues
+    buckets.resize(graph_partition.num_queues);
+  }
+
+  // Finds a random index value to find a queue
+  int select_random_q_idx() {
+    boost::random::uniform_int_distribution<> dist(0, (graph_partition.num_queues-1));
+    return dist(gen);
+  }
+
 };
+
+//==============================================================
+// wait till all futures complete their work
+// idx is the queue index to work on
+//==============================================================
+boost::int64_t total_msg_difference() {
+
+  boost::uint64_t s_c = send_count.load(std::memory_order_relaxed);
+  boost::uint64_t r_c = receive_count.load(std::memory_order_relaxed);
+
+  return (r_c - s_c);
+}
+
+
+HPX_PLAIN_ACTION(total_msg_difference);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_msg_difference_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_msg_difference_action, std_plus_type)
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_terminate_action, partition_terminate_action);
 
 // The macros below are necessary to generate the code required for exposing
 // our partition type remotely.
@@ -457,6 +622,10 @@ HPX_REGISTER_ACTION(partition_relax_action);
 
 typedef partition_server::dc_flush_action partition_flush_action;
 HPX_REGISTER_ACTION(partition_flush_action);
+
+typedef partition_server::dc_terminate_action partition_terminate_action;
+HPX_REGISTER_ACTION(partition_terminate_action);
+
 
 // TODO encapsulate parameters
 
@@ -496,16 +665,32 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   ///////////////////////////////////////////////////////////////////////////
   // Invoke remote relax
   ///////////////////////////////////////////////////////////////////////////
-  hpx::future<void> relax(vertex_distance const& vd,
-			  const partition_client_map_t& pmap) const {
+  void relax(vertex_distance const& vd,
+	     const partition_client_map_t& pmap) const {
     partition_server::dc_relax_action act;
-    return hpx::async(act, get_gid(), vd, pmap);
+    hpx::apply(act, get_gid(), vd, pmap);
   }
 
-  std::size_t flush() const {
+  ///////////////////////////////////////////////////////////////////////////
+  // Invoke remote or local flush
+  ///////////////////////////////////////////////////////////////////////////
+  void start_flush_tasks(int num_qs,
+			  const partition_client_map_t& pmap) const {
     partition_server::dc_flush_action act;
-    return hpx::async(act, get_gid()).get();
+    for (int i=0; i<num_qs; ++i) {
+      hpx::apply(act, get_gid(), i, pmap);
+    }
   }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Invokes termination
+  ///////////////////////////////////////////////////////////////////////////
+  hpx::future<void> terminate() {
+    partition_server::dc_terminate_action act;
+    return hpx::async(act, get_gid());
+  }
+
+
 };
 
 #endif

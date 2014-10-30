@@ -31,6 +31,7 @@ private:
   partition_client_map_t partitions;
 
   int num_vert_per_local = 0;
+  int num_qs;
 
   inline boost::uint32_t find_locality_id(vertex_t v,
 					  int num_vertices_per_local) {
@@ -87,13 +88,16 @@ public:
      
       int starte = rowindices[startv];
       int ende = rowindices[endv-1];
-      
+
+      num_qs = 5;
+
       std::cout << "startv : " << startv << " endv : " << endv
 		<< " starte : " << starte << " ende : " << ende 
 		<< std::endl;
       graph_partition_data pd(startv,
 			      endv,
-			      num_vert_per_local);
+			      num_vert_per_local,
+			      num_qs);
 
       pd.vertex_distances.resize(endv-startv);
       pd.vertex_distances.assign((endv-startv), 
@@ -216,6 +220,14 @@ public:
 //HPX_PLAIN_ACTION(distributed_control::relax, dc_relax_action);
 
 void distributed_control::run_chaotice_sssp(vertex_t source) {
+  
+  // start flush tasks
+  partition_client_map_t::iterator ite = 
+    partitions.begin();
+  for(; ite != partitions.end(); ++ite) {
+    (*ite).second.start_flush_tasks(num_qs, partitions);
+  }
+
   // Find the locality of the source
   boost::uint32_t locality = find_locality_id(source, 
 					      num_vert_per_local);
@@ -232,8 +244,31 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   //  future_collection_t futures;
   // relax source vertex
   // future_collection_t = vector <future <void> >
-  hpx::future<void> f = (*iteFind).second.relax(vd, partitions);
-  f.get();
+  (*iteFind).second.relax(vd, partitions);
+
+  // termination
+  std::vector<hpx::id_type> localities = hpx::find_all_localities();
+  boost::int64_t result = -1;
+  int attempt = 0;
+  while(result != 0 && attempt != 2) {
+    result = hpx::lcos::reduce<total_msg_difference_action>
+      (localities, std::plus<boost::int64_t>()).get();
+    result = result - 1;
+
+    std::cout << "result - " << result
+	      << " attempt - " << attempt << std::endl;
+
+    if (result == 0)
+      ++attempt;
+    else
+      attempt = 0;
+  }
+
+  // invoke termination
+  for(ite = partitions.begin(); ite != partitions.end(); ++ite) {
+    (*ite).second.terminate().get(); //TODO should have a when all
+  }
+  
 
   print_results();
 
@@ -247,7 +282,7 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
 // and relax all adjacent edges with new distance.
 // Updates to distance map are atomic.
 //======================================================
-hpx::future<void> partition_server::relax(const vertex_distance& vd,
+void partition_server::relax(const vertex_distance& vd,
 			     const partition_client_map_t& pmap) {
 
   std::cout << "Invoking relax in locality : "
@@ -256,9 +291,10 @@ hpx::future<void> partition_server::relax(const vertex_distance& vd,
 	    << " and distance : " << vd.distance
 	    << std::endl;
 
+  // We got a message so increase receive count
+  receive_count++;
+
   // graph_partition.print();
-  // Populate all future to a vector
-  future_collection_t futures;
 
   std::cout << "v - " << vd.vertex << " dis - " << vd.distance << " stored distance - "
 	    << graph_partition.get_vertex_distance(vd.vertex) << std::endl;
@@ -267,11 +303,57 @@ hpx::future<void> partition_server::relax(const vertex_distance& vd,
       vd.distance){
     // update distance atomically
     if (graph_partition.set_vertex_distance_atomic
-	(vd.vertex, vd.distance)){
-      // returned true. i.e. successfully updated.
-      // time to relax. First find the appropriate
-      // partition id (i.ee component id)
+	(vd.vertex, vd.distance)) {
 
+      // Get a random priority queue
+      int idx = select_random_q_idx();
+      buckets[idx].push(vd);
+    }
+  }
+}
+
+//======================================================
+// Starts flush tasks
+//======================================================
+void partition_server::flush_tasks(int idx,
+				   const partition_client_map_t& pmap) {  
+  HPX_ASSERT(0 <= idx && idx < graph_partition.num_queues);
+  buckets[idx].handle_queue(pmap, graph_partition);
+}
+
+//======================================================
+// This function will go through priority queue
+// found by idx and will relax all edges found in 
+// the queue.
+//======================================================
+void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
+				     graph_partition_data& graph_partition) {
+
+  while(!termination) {
+    // If queue is empty wait till an element is pushed
+    {
+      boost::mutex::scoped_lock scopedLock(mutex);
+      if (pq.empty()) {
+	q_empty = true; // This helps termination
+	cv.wait(scopedLock);
+      }
+    }
+    
+    if (!pq.empty())
+      q_empty = false;
+
+    // TODO we need to lock this ? ...
+    while(!pq.empty()) {
+      vertex_distance vd;
+
+      // lock and pop the element
+      {
+	boost::mutex::scoped_lock scopedLock(mutex);
+	vd = pq.top();
+	pq.pop();
+      }
+    
+      // relax vd
       graph_partition_data::OutgoingEdgePair_t pair 
 	= graph_partition.out_going_edges(vd.vertex);
       graph_partition_data::edge_iterator vebegin = pair.first;
@@ -292,14 +374,14 @@ hpx::future<void> partition_server::relax(const vertex_distance& vd,
 	  pmap.find(target_locality);
 	HPX_ASSERT(iteClient != pmap.end());
 
-	futures.push_back((*iteClient).second.relax(vertex_distance(target, 
-								    new_distance),
-						    pmap));
-      }
+	(*iteClient).second.relax(vertex_distance(target, 
+						  new_distance),
+				  pmap);
+	// sending messages. increase send count
+	send_count++;
     }
   }
-
-  return hpx::when_all(futures);
+}
 }
 
 
