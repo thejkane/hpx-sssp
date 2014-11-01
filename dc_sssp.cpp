@@ -250,7 +250,7 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
   std::vector<hpx::id_type> localities = hpx::find_all_localities();
   boost::int64_t result = -1;
   int attempt = 0;
-  while(result != 0 && attempt != 2) {
+  while(result != 0 || attempt != 2) {
     result = hpx::lcos::reduce<total_msg_difference_action>
       (localities, std::plus<boost::int64_t>()).get();
     result = result - 1;

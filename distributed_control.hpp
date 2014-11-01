@@ -35,6 +35,7 @@
 #include <boost/random/uniform_int_distribution.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/mutex.hpp>
+#include <boost/range/adaptor/map.hpp>
 
 #include "boost/graph/parallel/thread_support.hpp"
 #include "common_types.hpp"
@@ -692,5 +693,24 @@ struct partition : hpx::components::client_base<partition, partition_server> {
 
 
 };
+
+//====================================================================//
+namespace hpx { namespace traits {
+    template <>
+    struct serialize_as_future<partition_client_map_t>
+      : boost::mpl::true_
+    {
+      static void call(partition_client_map_t& m)
+      {
+	//	auto r = boost::adaptors::values(m);
+	//std::vector<partition> ps(boost::begin(r), boost::end(r)); 
+	auto r = boost::adaptors::values(m);
+	hpx::lcos::wait_all(boost::begin(r), boost::end(r));
+	//	hpx::lcos::wait_all(ps);
+      }
+    };
+    }}
+//====================================================================//
+
 
 #endif
