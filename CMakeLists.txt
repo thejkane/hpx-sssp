@@ -9,6 +9,8 @@ project(your_app CXX)
 # Instruct cmake to find the HPX settings
 find_package(HPX REQUIRED)
 
+include_directories("${PROJECT_SOURCE_DIR}/generator")
+
 # build your application using HPX
 #add_hpx_component(distributed_control_component
 #    ESSENTIAL

@@ -12,15 +12,22 @@
 // Description : The Distributed Control based SSSP implementation on HPX 
 //               platform.
 //=============================================================================
-#include "distributed_control.hpp"
-#include <iostream>       // std::cout, std::endl
+#include "hpx_csr.hpp"
+
+#include <iostream>
 #include <limits>
 #include <map>
 
+#include <boost/random/linear_congruential.hpp>
+#include <boost/graph/random.hpp>
+#include <boost/generator_iterator.hpp>
+#include <boost/random/uniform_int.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/graph/graph500_generator.hpp>
+
 // Whether to verify results (i.e. shortest path or not)
 bool verify = true; 
-
-
 
 struct distributed_control {
   
@@ -30,8 +37,23 @@ private:
   // map key - locality id, value - remote partition
   partition_client_map_t partitions;
 
-  int num_vert_per_local = 0;
+  // The graph scale
+  boost::int32_t scale;  
+
+  // Represents number of queues to be run per locality
   int num_qs;
+
+  // Number of vertitions per locality
+  int num_vert_per_local = 0;
+
+  // Maximum weight per edge
+  edge_property_t max_weight;
+
+  // Random number generator is needed to select a random vertex
+  boost::random::mt19937 gen;
+
+  // average number of outgoing edges
+  double edgefactor = 16;
 
   inline boost::uint32_t find_locality_id(vertex_t v,
 					  int num_vertices_per_local) {
@@ -51,9 +73,75 @@ private:
   }
 
 public:
-  void run_chaotice_sssp(vertex_t source);
+  // Number of vertices
+  vertex_t m;
 
-  void partition_graph(vertex_t source) {
+  // Number of edges
+  edge_t n;
+
+  //========================================================
+  // Constructor
+  // Args : sc - scale, qs - number of queues to spawn
+  //        max_w - maximum weight
+  //========================================================
+  distributed_control(boost::uint32_t sc,
+		      boost::uint32_t qs,
+		      boost::uint32_t max_w): 
+    scale(sc),
+    num_qs(qs),
+    max_weight(max_w),
+    m((unsigned long long)(1) << scale),
+    n(static_cast<edge_t>(floor(m * edgefactor)))
+  {}
+
+  //========================================
+  // Select a random source vertex
+  //========================================
+  vertex_t select_random_source() {
+    boost::random::uniform_int_distribution<> dist(1, m);
+    return (dist(gen) - 1);
+  }
+
+  //========================================================
+  // Generates edges for the given graph
+  // Mainly graph generation happens here.
+  //========================================================
+  void generate_graph(hpx_csr_graph& g) {
+
+    // The modified graph 500 iterator
+    typedef boost::graph500_iterator<vertex_t, edge_t> Graph500Iter;
+
+    // Random weight generation
+    typedef boost::uniform_int<edge_property_t> distribution_type;
+
+    boost::minstd_rand edge_weight_gen;
+
+    typedef boost::variate_generator<boost::minstd_rand&, distribution_type> gen_type;
+
+    gen_type die_gen(edge_weight_gen, distribution_type(1, max_weight));
+    boost::generator_iterator<gen_type> die(&die_gen);
+
+    // Randome edge generation
+    boost::uniform_int<uint64_t> 
+      rand_64(0, std::numeric_limits<uint64_t>::max());
+
+    boost::minstd_rand gen;
+    uint64_t a = rand_64(gen);
+    uint64_t b = rand_64(gen);
+
+    g.addEdges(Graph500Iter(scale, 0, a, b), 
+	       Graph500Iter(scale, n, a, b), die);
+  }
+
+  //========================================================
+  // Invokes actual distributed control algorithm.
+  //========================================================
+  void run_dc(vertex_t source);
+
+  //========================================================
+  // Small scale test case for debugging
+  //========================================================
+  void partition_graph_test(vertex_t source) {
     // TODO : Graph generation
     // Let's create 2 arrays 2 represent row_indices and columns
     // Then lets partition those 2 arrays - These 2 arrays represent the graph
@@ -131,6 +219,15 @@ public:
     }
   }
 
+  //========================================================
+  // Partition the graph for the running localities
+  //========================================================
+  void partition_graph(hpx_csr_graph& g) {
+    g.partition_graph(partitions, num_qs, num_vert_per_local);
+    HPX_ASSERT(num_vert_per_local != 0);
+  }
+
+
   void print_results() {
     std::cout << "===================== Printing Results ==============================" << std::endl;
     partition_client_map_t::iterator ite = partitions.begin();
@@ -151,8 +248,10 @@ public:
     }
   }
 
+  //========================================================
   // This function iterates all partitions (remote & local)
   // prints partition data
+  //========================================================
   void print_all_partitions() {
     partition_client_map_t::iterator ite = partitions.begin();
     for (; ite != partitions.end(); ++ite) {
@@ -217,9 +316,13 @@ public:
   }
 };
 
-//HPX_PLAIN_ACTION(distributed_control::relax, dc_relax_action);
 
-void distributed_control::run_chaotice_sssp(vertex_t source) {
+//======================================================
+// Start invoking Distributed Control algorithm.
+// source - The vertex we need to calculate distance
+// from.
+//======================================================
+void distributed_control::run_dc(vertex_t source) {
   
   // start flush tasks
   partition_client_map_t::iterator ite = 
@@ -264,14 +367,16 @@ void distributed_control::run_chaotice_sssp(vertex_t source) {
       attempt = 0;
   }
 
-  // invoke termination
+  std::vector< hpx::future<void> > terminating_ps;
+  // invoke termination parallely
   for(ite = partitions.begin(); ite != partitions.end(); ++ite) {
-    (*ite).second.terminate().get(); //TODO should have a when all
+    terminating_ps.push_back((*ite).second.terminate());
   }
-  
+
+  // wait for everyone to terminate
+  hpx::when_all(terminating_ps).get();
 
   print_results();
-
 }
 
 //======================================================
@@ -385,25 +490,62 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 }
 
 
-///////////////////////////////////////////////////////////////////////////////
-// Note : Irrespective of number of localities we are running, hpx_main will only
+
+//========================================================
+// Note : Irrespective of number of localities we are running, 
+// hpx_main will only
 //        get called for locality 0.
+//========================================================
 int hpx_main(boost::program_options::variables_map& vm) {
 
-  boost::uint64_t scale = vm["scale"].as<boost::uint64_t>();   // Scale of the graph to be generated
+  // Scale of the graph to be generated
+  boost::uint32_t scale = vm["scale"].as<boost::uint32_t>();
+  boost::uint32_t queues = vm["queues"].as<boost::uint32_t>();
+  boost::uint32_t max_weight = vm["max_weight"].as<boost::uint32_t>();
+
+  std::cout << "[Input Read] Graph scale : " << scale 
+  << ", queues : " << queues 
+  << ", max_weight : " << max_weight << std::endl;
 
   if (!vm.count("verify"))
     verify = false;
 
   vertex_t source = 0;
-  distributed_control dc;
-  dc.partition_graph(source);
+  distributed_control dc(scale, queues, max_weight);
+
+  std::cout << "Generating the graph ..." << std::endl;
+  std::cout << "Vertices : " << dc.m << " Edges : " << dc.n << std::endl;
+
+  {
+    // Create the graph
+    hpx_csr_graph g(dc.m, dc.n, true);
+    // Generate edges
+    dc.generate_graph(g);
+
+    std::cout << "Graph generation ....... done" << std::endl;
+
+#ifdef DC_TEST_CASE
+    dc.partition_graph_test(source);
+#else
+    dc.partition_graph(g);
+#endif
+  } // HPX CSR graph is only needed for graph generation
+  // Once graph is partitioned & distributed we dont need to
+  // holde on to HPX CSR graph. The memory can be released.
+  // Therefore we need these additional braces.
 
   std::cout << "=============================================" << std::endl;
   std::cout << "=============================================" << std::endl;
   
-  //  dc.print_all_partitions();
-  dc.run_chaotice_sssp(source);
+#ifndef DC_TEST_CASE
+  // Select a random source vertex
+  source = dc.select_random_source();
+#endif
+  
+  std::cout << "Running distributed control for source : " 
+            << source << std::endl;
+
+  dc.run_dc(source);
   
   return hpx::finalize();
 }
@@ -415,8 +557,12 @@ int main(int argc, char* argv[])
 
   options_description desc_commandline;
   desc_commandline.add_options()
-    ("scale", value<boost::uint64_t>()->default_value(10),
+    ("scale", value<boost::uint32_t>()->default_value(10),
      "The scale of the graph to be generated.")
+    ("queues", value<boost::uint32_t>()->default_value(5),
+     "The number of queues per each locality.")
+    ("max_weight", value<boost::uint32_t>()->default_value(100),
+     "The number of queues per each locality.")
     ("verify", "Verify results")
     ;
 
