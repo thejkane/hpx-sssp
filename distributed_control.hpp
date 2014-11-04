@@ -307,8 +307,11 @@ public:
 
   // Get a start iterator to edges going out from vertex v
   OutgoingEdgePair_t out_going_edges(vertex_t v) {
-    //    std::cout << "v-" << v << " start-" << vertex_start << " end-"
-    //	      << vertex_end << std::endl;
+#ifdef PRINT_DEBUG
+    std::cout << "v-" << v << " start-" << vertex_start << " end-"
+    	      << vertex_end << std::endl;
+#endif
+
     assert(vertex_start <= v && v < vertex_end);
     vertex_t local_v = v - vertex_start;
 
@@ -335,9 +338,10 @@ public:
 
   inline bool set_vertex_distance_atomic(vertex_t vid, 
 					 vertex_property_t new_distance) {
-
+#ifdef PRINT_DEBUG
     std::cout << "vid - " << vid << " start - " << vertex_start
 	      << " end - " << vertex_end << std::endl;
+#endif
     HPX_ASSERT(vertex_start <= vid && vid < vertex_end);
 
     vertex_t localvid = vid - vertex_start;
@@ -424,14 +428,14 @@ typedef std::vector< hpx::future <void> > future_collection_t;
 typedef hpx::lcos::local::spinlock mutex_type;
 
 //==========================================//
-// send_count - stores the number of messages
+// completed_count - stores the number of messages
 // sent through flush_task
 // receive_count - stores the number of messages
 // received through relax
 // these are useful for termination.
 //==========================================//  
-std::atomic_int_fast64_t receive_count(0);
-std::atomic_int_fast64_t send_count(0); // Source does not send a message
+std::atomic_int_fast64_t active_count(0);
+std::atomic_int_fast64_t completed_count(0); // Source does not send a message
 
 ///////////////////////////////////////////////////////////////////////////////
 // Represents a single priority queue
@@ -465,6 +469,10 @@ struct dc_priority_queue {
     cv.notify_all();
   }
 
+  void reset() {
+    termination = false;
+  }
+
 private:
   bool termination;
   priority_q_t pq;
@@ -487,13 +495,13 @@ struct partition_server
   partition_server() {}
 
   partition_server(graph_partition_data const& data)
-    : graph_partition(data), termination(false){
+    : graph_partition(data) {
     
     init();
   }
 
   partition_server(partition_server const& ps)
-    : graph_partition(ps.graph_partition), termination(false) {
+    : graph_partition(ps.graph_partition) {
 
     init();
   }
@@ -533,6 +541,32 @@ struct partition_server
   HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
 			      dc_flush_action);
 
+  //==============================================================
+  // Reset counters for a new run
+  //==============================================================
+  void reset_counters() {
+    // reset counters
+    completed_count = 0;
+    active_count = 0;
+    
+    // reset termination variable in each q
+    for(int i=0; i<graph_partition.num_queues; ++i) {
+      buckets[i].reset();
+    }
+
+    // reset vertex distance
+    graph_partition.
+      vertex_distances.
+      assign(graph_partition.vertex_distances.size(),
+	     std::numeric_limits<vertex_t>::max());
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, reset_counters,
+			      dc_reset_counters_action);
+
+  //==============================================================
+  // Handles termination.
+  //==============================================================
   void terminate() {
     for(int i=0; i<graph_partition.num_queues; ++i) {
       buckets[i].terminate();
@@ -556,12 +590,6 @@ private:
   all_q_t buckets;
 
   //==========================================//
-  // true - termination started
-  // false - termination not started
-  //==========================================//  
-  bool termination;
-
-  //==========================================//
   // To select a pq randomly
   //==========================================//
   boost::random::mt19937 gen;
@@ -569,7 +597,7 @@ private:
   // Initializes thread queues
   void init() {
     
-    receive_count = 0;
+    active_count = 0;
 
     // create queues
     buckets.resize(graph_partition.num_queues);
@@ -587,23 +615,35 @@ private:
 // wait till all futures complete their work
 // idx is the queue index to work on
 //==============================================================
-boost::int64_t total_msg_difference() {
+boost::int64_t total_completed_count() {
 
-  boost::uint64_t s_c = send_count.load(std::memory_order_relaxed);
-  boost::uint64_t r_c = receive_count.load(std::memory_order_relaxed);
-
-  return (r_c - s_c);
+  boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
+  return cc;
 }
 
 
-HPX_PLAIN_ACTION(total_msg_difference);
+HPX_PLAIN_ACTION(total_completed_count);
 typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_msg_difference_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_msg_difference_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_completed_count_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
+
+boost::int64_t total_active_count() {
+
+  boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
+  return ac;
+}
+
+HPX_PLAIN_ACTION(total_active_count);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_active_count_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
+
+
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_terminate_action, partition_terminate_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_reset_counters_action, partition_counter_reset_action);
 
 // The macros below are necessary to generate the code required for exposing
 // our partition type remotely.
@@ -626,6 +666,9 @@ HPX_REGISTER_ACTION(partition_flush_action);
 
 typedef partition_server::dc_terminate_action partition_terminate_action;
 HPX_REGISTER_ACTION(partition_terminate_action);
+
+typedef partition_server::dc_reset_counters_action partition_counter_reset_action;
+HPX_REGISTER_ACTION(partition_counter_reset_action);
 
 
 // TODO encapsulate parameters
@@ -689,6 +732,14 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   hpx::future<void> terminate() {
     partition_server::dc_terminate_action act;
     return hpx::async(act, get_gid());
+  }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Reset counters for next run
+  ///////////////////////////////////////////////////////////////////////////
+  void reset_counters() {
+    partition_server::dc_reset_counters_action act;
+    act(get_gid());
   }
 
 
