@@ -529,9 +529,6 @@ void distributed_control::run_dc(vertex_t source) {
 void partition_server::relax(const vertex_distance& vd,
 			     const partition_client_map_t& pmap) {
 
-  // We got a message so increase receive count
-  active_count++;
-
 #ifdef PRINT_DEBUG
   std::cout << "Invoking relax in locality : "
 	    << hpx::naming::get_locality_id_from_id(hpx::find_here())
@@ -559,6 +556,10 @@ void partition_server::relax(const vertex_distance& vd,
     }
 
   }
+
+  // We got a message so increase receive count
+  // should be done at the end of the function
+  active_count++;
 }
 
 //======================================================
@@ -629,10 +630,13 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	  pmap.find(target_locality);
 	HPX_ASSERT(iteClient != pmap.end());
 
+	// should be increased before sending the message
+	completed_count++;
+
 	(*iteClient).second.relax(vertex_distance(target, 
 						  new_distance),
 				  pmap);
-	completed_count++;
+
       }
 
   }
@@ -748,6 +752,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
     boost::uint32_t tot_visited = dc.count_total_visited_vertices();
     // if scale > 10 and total visited is less than 100 ignore the run
     if (scale > 10 && tot_visited < 100) {
+      std::cout << "decrementing iteration ... " << std::endl;
       --i;
       continue;
     }
