@@ -266,6 +266,7 @@ public:
     }
     
     std::cout << "Total visited vertices : " << visited << std::endl;
+    return visited;
   }
 
   //========================================================
