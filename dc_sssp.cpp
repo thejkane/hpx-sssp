@@ -162,7 +162,6 @@ public:
     // Let's create 2 arrays 2 represent row_indices and columns
     // Then lets partition those 2 arrays - These 2 arrays represent the graph
     int numvertices = 7;
-    int numcolumns = 22;
 
     int rowindices[] = {0, 3, 6, 10, 14, 17, 20, 22}; // size of row indices array = vertices + 1
     int columns[] = {1, 2, 4, 0, 2, 3, 0, 1, 3, 4, 1, 2, 5, 6, 0, 2, 5, 3, 4, 6, 3, 5};
@@ -179,7 +178,7 @@ public:
     num_vert_per_local = numvertices / num_locs;
     int vert_balance = numvertices % num_locs;
 
-    for(int i=0; i<num_locs; ++i) {
+    for(std::size_t i=0; i<num_locs; ++i) {
       int startv = i*num_vert_per_local;
 
       // if this is last locality add balance vertices to last
@@ -732,7 +731,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
   all_timing_t all_timings;
 
 #ifndef DC_TEST_CASE
-  for (int i=0; i<num_sources; ++i) {
+  for (boost::uint32_t i=0; i<num_sources; ++i) {
     // Select a random source vertex
     source = dc.select_random_source();
 #endif

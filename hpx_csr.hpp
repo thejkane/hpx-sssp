@@ -330,7 +330,7 @@ public:
 
     //std::cout << "partitions X : " << pdatas.size() << std::endl;
 
-    for(int i=0; i<num_locs; ++i) {
+    for(std::size_t i=0; i<num_locs; ++i) {
       int startv = i*num_vert_per_local;
 
       // if this is last locality add balance vertices to last
@@ -382,12 +382,10 @@ public:
   void validate_partitions(const std::vector<graph_partition_data>&
 			   partitions) {
 
-    std::size_t num_locs = partitions.size();
-    std::size_t num_vert_per_local = vertices / num_locs;
     int loc = 0;
 
     // checking vertices are equal
-    for(int i=0; i<vertices+1; ++i) {
+    for(std::size_t i=0; i<vertices+1; ++i) {
       if (i == partitions[loc].vertex_end) {
 	++loc;
       }
@@ -402,9 +400,9 @@ public:
     }
 
     loc = 0;
-    int col_val = 0;
+    std::size_t col_val = 0;
     // checking edges are equals
-    for(int k=0; k < edges; ++k, ++col_val) {
+    for(std::size_t k=0; k < edges; ++k, ++col_val) {
       if (col_val == partitions[loc].columns.size()) {
 	++loc;
 	col_val = 0;
@@ -420,7 +418,7 @@ public:
     std::cout << "Printing row index array ...." << std::endl;
     std::cout << "[";
     // printing raw index array
-    for (int i=0; i<(vertices+1); ++i) {
+    for (std::size_t i=0; i<(vertices+1); ++i) {
       std::cout << row_indices[i];
       if (i != vertices) {
         std::cout << ", ";
@@ -432,7 +430,7 @@ public:
     std::cout << "Printing row array ...." << std::endl;
     std::cout << "[";
     // printing raw index array
-    for (int i=0; i<edges; ++i) {
+    for (std::size_t i=0; i<edges; ++i) {
       std::cout << columns[i];
       if (i != (edges-1)) {
         std::cout << ", ";
@@ -452,11 +450,11 @@ private:
   std::size_t last_updated_ri = 0; // last updated row index; only used during graph construction time
 
   void init() {
-    for(int j=0; j < (vertices+1); ++j) {
+    for(std::size_t j=0; j < (vertices+1); ++j) {
       row_indices[j] = INVALID_VERTEX;
     }
     
-    for(int k = 0; k < edges; ++k) {
+    for(std::size_t k = 0; k < edges; ++k) {
       columns[k] = INVALID_EDGE;
     }
   }

@@ -383,7 +383,7 @@ public:
 
     boost::uint32_t loc_id = find_locality_id(v);
     
-    for (int k=0; k<num_locs; ++k) {
+    for (std::size_t k=0; k<num_locs; ++k) {
       if (hpx::naming::get_locality_id_from_id(localities[k])
 	  == loc_id)
 	return localities[k];
@@ -753,9 +753,9 @@ namespace hpx { namespace traits {
     {
       static void call(partition_client_map_t& m)
       {
-	//	auto r = boost::adaptors::values(m);
-	//std::vector<partition> ps(boost::begin(r), boost::end(r)); 
 	auto r = boost::adaptors::values(m);
+	//std::vector<partition> ps(boost::begin(r), boost::end(r)); 
+	//auto r = boost::adaptors::values(m);
 	hpx::lcos::wait_all(boost::begin(r), boost::end(r));
 	//	hpx::lcos::wait_all(ps);
       }
