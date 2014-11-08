@@ -514,9 +514,8 @@ void distributed_control::run_dc(vertex_t source) {
 
 #ifdef PRINT_DEBUG
   std::cout << "TERMINATION DONE" << std::endl;
-#endif
-
   print_results();
+#endif
 
   if (verify) {
     verify_results();
@@ -756,6 +755,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
 
     std::cout << "Running distributed control for scale : " << scale
 	      << ", num_queues : " << queues
+	      << ", yield count : " << yield_count
 	      << ", max_weight : " << max_weight
 	      << ", source : " << source 
 	      << ", iteration : " << i << std::endl;
@@ -777,6 +777,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
     boost::uint64_t elapsed = after - before;
     std::cout << "Time for distributed control run with scale : " << scale
 	      << ", num_queues : " << queues
+	      << ", yield count : " << yield_count
 	      << ", max_weight : " << max_weight
 	      << ", source : " << source 
 	      << ", iteration : " << i 
