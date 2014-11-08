@@ -55,6 +55,9 @@ private:
   // Maximum weight per edge
   edge_property_t max_weight;
 
+  // Count that flushing thread should yield
+  boost::uint32_t yield_count;  
+
   // Random number generator is needed to select a random vertex
   boost::random::mt19937 gen;
 
@@ -92,10 +95,12 @@ public:
   //========================================================
   distributed_control(boost::uint32_t sc,
 		      boost::uint32_t qs,
-		      boost::uint32_t max_w): 
+		      boost::uint32_t max_w,
+		      boost::uint32_t yield): 
     scale(sc),
     num_qs(qs),
     max_weight(max_w),
+    yield_count(yield),
     m((unsigned long long)(1) << scale),
     n(static_cast<edge_t>(floor(m * edgefactor)))
   {}
@@ -433,7 +438,7 @@ void distributed_control::run_dc(vertex_t source) {
   partition_client_map_t::iterator ite = 
     partitions.begin();
   for(; ite != partitions.end(); ++ite) {
-    (*ite).second.start_flush_tasks(num_qs, partitions);
+    (*ite).second.start_flush_tasks(num_qs, partitions, yield_count);
   }
 
   // Find the locality of the source
@@ -566,9 +571,10 @@ void partition_server::relax(const vertex_distance& vd,
 // Starts flush tasks
 //======================================================
 void partition_server::flush_tasks(int idx,
-				   const partition_client_map_t& pmap) {  
+				   const partition_client_map_t& pmap,
+				   const boost::uint32_t yield_count) {  
   HPX_ASSERT(0 <= idx && idx < graph_partition.num_queues);
-  buckets[idx].handle_queue(pmap, graph_partition);
+  buckets[idx].handle_queue(pmap, graph_partition, yield_count);
 }
 
 //======================================================
@@ -577,23 +583,32 @@ void partition_server::flush_tasks(int idx,
 // the queue.
 //======================================================
 void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
-				     graph_partition_data& graph_partition) {
+				     graph_partition_data& graph_partition,
+				     const boost::uint32_t yield_count) {
+
+  boost::uint32_t ite_count = 0;
 
   while(!termination) {
     // If queue is empty wait till an element is pushed
     {
       boost::mutex::scoped_lock scopedLock(mutex);
       if (pq.empty()) {
-	q_empty = true; // This helps termination
 	cv.wait(scopedLock);
       }
     }
     
-    if (!pq.empty())
-      q_empty = false;
-
     // TODO we need to lock this ? ...
     while(!pq.empty()) {
+      ++ite_count;
+
+      // if iteration count is equal to yield count
+      // then yield current thread
+      if (ite_count == yield_count) {
+	// reset counter
+	ite_count = 0;
+	hpx::this_thread::yield();
+      }
+
       vertex_distance vd;
 
       // lock and pop the element
@@ -691,6 +706,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
   boost::uint32_t queues = vm["queues"].as<boost::uint32_t>();
   boost::uint32_t max_weight = vm["max_weight"].as<boost::uint32_t>();
   boost::uint32_t num_sources = vm["num_sources"].as<boost::uint32_t>();
+  boost::uint32_t yield_count = vm["yield_count"].as<boost::uint32_t>();
 
   if (!vm.count("verify"))
     verify = false;
@@ -699,10 +715,11 @@ int hpx_main(boost::program_options::variables_map& vm) {
 	    << ", queues : " << queues 
 	    << ", max_weight : " << max_weight 
 	    << ", num_sources : " << num_sources 
+	    << ", yield_count : " << yield_count 
 	    << ", verify results : " << verify << std::endl;
 
   vertex_t source = 0;
-  distributed_control dc(scale, queues, max_weight);
+  distributed_control dc(scale, queues, max_weight, yield_count);
 
   std::cout << "Generating the graph ..." << std::endl;
   std::cout << "Vertices : " << dc.m << " Edges : " << dc.n << std::endl;
@@ -801,6 +818,8 @@ int main(int argc, char* argv[])
      "The number of queues per each locality.")
     ("num_sources", value<boost::uint32_t>()->default_value(18),
      "The number of sources to run.")
+    ("yield_count", value<boost::uint32_t>()->default_value(18),
+     "After how many counts the flushing thread should yield, so that it give space to run other threads.")
     ("verify", "Verify results")
     ;
 

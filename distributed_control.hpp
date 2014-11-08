@@ -442,7 +442,7 @@ std::atomic_int_fast64_t completed_count(0); // Source does not send a message
 ///////////////////////////////////////////////////////////////////////////////
 struct dc_priority_queue {
   
-  dc_priority_queue():termination(false), q_empty(false){}
+  dc_priority_queue():termination(false){}
 
   dc_priority_queue(const dc_priority_queue& other):
     termination(other.termination),
@@ -461,7 +461,8 @@ struct dc_priority_queue {
   }
 
   void handle_queue(const partition_client_map_t& pmap,
-		    graph_partition_data& graph_partition);
+		    graph_partition_data& graph_partition,
+		    const boost::uint32_t yield_count);
 
   // Terminates the algorithms
   void terminate() {
@@ -478,10 +479,6 @@ private:
   priority_q_t pq;
   hpx::lcos::local::condition_variable cv;
   boost::mutex mutex;
-
-public:
-  std::atomic_bool q_empty;
-
 };
 
 
@@ -536,7 +533,8 @@ struct partition_server
   // idx is the queue index to work on
   //==============================================================
   void flush_tasks(int idx,
-		   const partition_client_map_t& pmap);
+		   const partition_client_map_t& pmap,
+		   const boost::uint32_t yield_count);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
 			      dc_flush_action);
@@ -719,10 +717,11 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   // Invoke remote or local flush
   ///////////////////////////////////////////////////////////////////////////
   void start_flush_tasks(int num_qs,
-			  const partition_client_map_t& pmap) const {
+			 const partition_client_map_t& pmap,
+			 const boost::uint32_t yield_count) const {
     partition_server::dc_flush_action act;
     for (int i=0; i<num_qs; ++i) {
-      hpx::apply(act, get_gid(), i, pmap);
+      hpx::apply(act, get_gid(), i, pmap, yield_count);
     }
   }
 
