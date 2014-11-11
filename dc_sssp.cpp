@@ -603,6 +603,7 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
       // if iteration count is equal to yield count
       // then yield current thread
       if (ite_count == yield_count) {
+	std::cout << "Invoking thread yield .......... Reached thread count " << yield_count << std::endl;
 	// reset counter
 	ite_count = 0;
 	hpx::this_thread::yield();
@@ -768,11 +769,11 @@ int hpx_main(boost::program_options::variables_map& vm) {
     // check the total visited count
     boost::uint32_t tot_visited = dc.count_total_visited_vertices();
     // if scale > 10 and total visited is less than 100 ignore the run
-    if (scale > 10 && tot_visited < 100) {
+    /*    if (scale > 10 && tot_visited < 100) {
       std::cout << "decrementing iteration ... " << std::endl;
       --i;
       continue;
-    }
+      }*/
     
     boost::uint64_t elapsed = after - before;
     std::cout << "Time for distributed control run with scale : " << scale
@@ -780,6 +781,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
 	      << ", yield count : " << yield_count
 	      << ", max_weight : " << max_weight
 	      << ", source : " << source 
+	      << ", total visited count : " << tot_visited
 	      << ", iteration : " << i 
 	      << " is : " << (elapsed / 1e9) << std::endl;
 
