@@ -23,17 +23,13 @@
 
 #include <boost/format.hpp>
 #include <boost/cstdint.hpp>
-#include <boost/random/linear_congruential.hpp>
-#include <boost/graph/random.hpp>
-#include <boost/generator_iterator.hpp>
-#include <boost/random/uniform_int.hpp>
-#include <boost/random/uniform_int_distribution.hpp>
-#include <boost/random/mersenne_twister.hpp>
-#include <boost/graph/graph500_generator.hpp>
 #include <boost/graph/relax.hpp>
 
 // Whether to verify results (i.e. shortest path or not)
 bool verify = true; 
+
+// undirected graph
+bool undirected = true;
 
 struct distributed_control {
   
@@ -111,6 +107,72 @@ public:
   vertex_t select_random_source() {
     boost::random::uniform_int_distribution<> dist(1, m);
     return (dist(gen) - 1);
+  }
+
+  //========================================
+  // Generates separate partitions
+  //========================================
+  void generate_distributed_graph() {
+
+    std::vector<hpx::naming::id_type> localities =
+      hpx::find_all_localities();
+    std::size_t num_locs = localities.size();
+    std::cout << "Number of localities : " << num_locs << std::endl;
+
+     // equally distribute vertices among localities
+    num_vert_per_local = m / num_locs;
+    int vert_balance = m % num_locs;
+
+    //std::cout << "partitions X : " << pdatas.size() << std::endl;
+
+    std::vector< hpx::future<void> > futures;
+
+    //seeds
+    // Randome edge generation
+    boost::uniform_int<uint64_t> 
+      rand_64(0, std::numeric_limits<uint64_t>::max());
+
+    boost::minstd_rand gen;
+    uint64_t a = rand_64(gen);
+    uint64_t b = rand_64(gen);
+
+    for(std::size_t i=0; i<num_locs; ++i) {
+      vertex_t startv = i*num_vert_per_local;
+
+      // if this is last locality add balance vertices to last
+      vertex_t endv;
+      if (i == num_locs-1) {
+	endv = num_vert_per_local+i*num_vert_per_local + vert_balance;
+      } else {
+	endv = num_vert_per_local+i*num_vert_per_local;
+      }
+     
+      graph_partition_data pd(startv,
+			      endv,
+			      num_vert_per_local,
+			      num_qs,
+			      undirected);
+           
+      // Distribute data
+      // To distribute we invoke component client, i.e. partition
+      // and give locality and graph_partition. This operation will 
+      // distribute graph_partition to remote locality
+      std::cout << "Pushing to locality : " << 
+	hpx::naming::get_locality_id_from_id(localities[i]) << std::endl;
+      //pd.print();
+      partition p(localities[i], pd);
+
+      // generate local graphs
+      futures.push_back(p.generate_local_graph(scale,
+					       n,
+					       max_weight,
+					       a,
+					       b));
+
+      partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
+    }
+
+    hpx::wait_all(futures);
   }
 
   //========================================================
@@ -205,7 +267,8 @@ public:
       graph_partition_data pd(startv,
 			      endv,
 			      num_vert_per_local,
-			      num_qs);
+			      num_qs,
+			      undirected);
 
       pd.vertex_distances.resize(endv-startv);
       pd.vertex_distances.assign((endv-startv), 
@@ -603,7 +666,7 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
       // if iteration count is equal to yield count
       // then yield current thread
       if (ite_count == yield_count) {
-	std::cout << "Invoking thread yield .......... Reached thread count " << yield_count << std::endl;
+	//	std::cout << "Invoking thread yield .......... Reached thread count " << yield_count << std::endl;
 	// reset counter
 	ite_count = 0;
 	hpx::this_thread::yield();
@@ -726,16 +789,17 @@ int hpx_main(boost::program_options::variables_map& vm) {
 
   {
     // Create the graph
-    hpx_csr_graph g(dc.m, dc.n, true);
+    //hpx_csr_graph g(dc.m, dc.n, true);
     // Generate edges
-    dc.generate_graph(g);
+    //dc.generate_graph(g);
 
+    dc.generate_distributed_graph();
     std::cout << "Graph generation ....... done" << std::endl;
-
+    //dc.print_all_partitions();
 #ifdef DC_TEST_CASE
-    dc.partition_graph_test(source);
+    //dc.partition_graph_test(source);
 #else
-    dc.partition_graph(g);
+    //dc.partition_graph(g);
 #endif
   } // HPX CSR graph is only needed for graph generation
   // Once graph is partitioned & distributed we dont need to
@@ -788,7 +852,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
     all_timings.push_back(elapsed);
 
 #ifndef DC_TEST_CASE
-  }
+    }
 #endif
 
     boost::uint64_t const num_worker_threads = hpx::get_num_worker_threads();

@@ -37,6 +37,16 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/range/adaptor/map.hpp>
 
+// For graph generation
+#include <boost/random/linear_congruential.hpp>
+#include <boost/graph/random.hpp>
+#include <boost/generator_iterator.hpp>
+#include <boost/random/uniform_int.hpp>
+#include <boost/random/uniform_int_distribution.hpp>
+#include <boost/random/mersenne_twister.hpp>
+#include <boost/graph/graph500_generator.hpp>
+
+
 #include "boost/graph/parallel/thread_support.hpp"
 #include "common_types.hpp"
 
@@ -44,6 +54,42 @@ struct partition;
 typedef std::map<boost::uint32_t, partition> partition_client_map_t;
 
 typedef std::vector<int> graph_array_t;
+
+
+//===========================================
+// This use to build the histogram.
+// contains target vertex and edge weight
+//===========================================
+struct target_weight {
+  vertex_t target;
+  edge_property_t weight;
+      
+  target_weight(vertex_t t, edge_property_t w) : target(t), weight(w){}
+};
+
+  // Edges are stored as a multiset in the histogram
+  // sort comparer to maintain edges in order
+struct tw_comparator {
+  bool operator() (const target_weight& tw1, 
+		   const target_weight& tw2) const {
+    if (tw1.target < tw2.target)
+      return true;
+    else if (tw1.target == tw2.target) {
+      return tw1.weight < tw2.weight;
+    } else {
+      return false;
+    }
+  }
+};
+
+// target vertex and edge weight
+typedef std::multiset<target_weight, tw_comparator> EdgeList_t;
+// source vertex and list of targets
+// for (1,3)-w1, (1,5)-w2 we have
+// 1 - 3-w1, 5-w2 etc ...
+typedef std::map<vertex_t, EdgeList_t> HistogramMap_t;
+
+
 
 //====================================================================//
 // Vertex distance type
@@ -108,6 +154,9 @@ struct graph_partition_data {
   // Number of queues to create
   int num_queues;
 
+  // graph is undirected or not
+  bool undirected;
+
   graph_array_t row_indices;
   graph_array_t columns;
   graph_array_t weights;
@@ -121,6 +170,7 @@ private:
     ar & vertex_end;
     ar & number_vertices_per_locality;
     ar & num_queues;
+    ar & undirected;
     ar & row_indices;
     ar & columns;
     ar & weights;
@@ -248,17 +298,24 @@ public:
   graph_partition_data(int _vstart, 
 		       int _vend, 
 		       int vert_loc,
-		       int num_q) : 
+		       int num_q,
+		       bool und) : 
     vertex_start(_vstart), 
     vertex_end(_vend),
     number_vertices_per_locality(vert_loc),
-    num_queues(num_q) {
+    num_queues(num_q),
+    undirected(und) {
+
+    row_indices.resize((vertex_end - vertex_start) + 1);
+    vertex_distances.resize(vertex_end - vertex_start);
+
   }
 
   graph_partition_data(int _vstart, 
 		       int _vend,
 		       int vert_loc,
 		       int num_q,
+		       bool und,
 		       const graph_array_t& _ri,
 		       const graph_array_t& _cl,
 		       const graph_array_t& _wt,
@@ -267,6 +324,7 @@ public:
     vertex_end(_vend),
     number_vertices_per_locality(vert_loc),
     num_queues(num_q),
+    undirected(und),
     row_indices(_ri), 
     columns(_cl),
     weights(_wt), 
@@ -279,6 +337,7 @@ public:
     vertex_end(other.vertex_end),
     number_vertices_per_locality(other.number_vertices_per_locality),
     num_queues(other.num_queues),
+    undirected(other.undirected),
     row_indices(other.row_indices),
     columns(other.columns),
     weights(other.weights),
@@ -305,6 +364,115 @@ public:
 			 vertex_start);
   }
 
+
+  void buildHistogram(HistogramMap_t& histogram_map, 
+		      vertex_t source,
+		      vertex_t target, 
+		      edge_property_t weight,
+		      bool flipped) {
+
+    HistogramMap_t::iterator iteFind = histogram_map.find(source);
+    if (iteFind == histogram_map.end()) { // new source
+      EdgeList_t target_list;
+      target_list.insert(target_weight(target, weight));
+      histogram_map.insert(std::make_pair(source, target_list));
+    } else { // source already exists
+      (*iteFind).second.insert(target_weight(target, weight));
+    }
+    
+    if (undirected) {
+      if (!flipped) {
+	buildHistogram(histogram_map, target, source, weight, true);
+      }
+    }
+
+  }
+
+
+  // Assumes iterator also includes reversed edges for undirected graphs.
+  template <typename RandomAccessIterator, typename EdgePropertyIterator>
+  void addEdges(RandomAccessIterator begin, RandomAccessIterator end,
+		EdgePropertyIterator epiter) {
+
+    HistogramMap_t histogram_map;
+    for (; begin != end; ++begin, ++epiter) {
+      //std::cout << "Before histogram : (" 
+      //		<< (*begin).first << ", " << (*begin).second
+      //		<< ")" << std::endl;
+      // check whether source vertex belong to current
+      // partition. If not continue.
+      if (vertex_start <= (*begin).first &&
+	  (*begin).first < vertex_end) {
+	buildHistogram(histogram_map, (*begin).first, 
+		       (*begin).second, *epiter, false); 
+      }
+      // flipped=false => edge need to flip for undirected
+    }
+
+    //    std::cout << "coming here : " << vertex_start << " - "
+    //	      << vertex_end << std::endl;
+
+    edge_t row_ind = 1; // starts with 1
+    edge_t col_ind = 0;
+    row_indices[0] = 0;
+
+    for(vertex_t k=vertex_start; k < vertex_end; ++k) {
+      HistogramMap_t::iterator iteFind = histogram_map.find(k);
+      if (iteFind != histogram_map.end()) {
+	EdgeList_t list = (*iteFind).second;
+	row_indices[row_ind] = row_indices[row_ind-1] + list.size();
+	++row_ind;
+	EdgeList_t::iterator iteList = list.begin();
+	for (; iteList != list.end(); ++iteList) {
+	  columns.push_back((*iteList).target);
+	  weights.push_back((*iteList).weight);
+	  ++col_ind;
+	}
+      } else {
+	// no edge
+	row_indices[row_ind] = row_indices[row_ind-1];
+	++row_ind;
+      }
+    }
+
+    HPX_ASSERT(row_ind == row_indices.size());
+    HPX_ASSERT(col_ind == columns.size());
+    HPX_ASSERT(col_ind == weights.size());
+  }
+
+
+  void generate_local_graph_partition(boost::uint32_t scale,
+				      edge_t n, /* number of edges */
+				      boost::uint32_t max_weight,
+				      uint64_t a,
+				      uint64_t b) {
+    // The modified graph 500 iterator
+    typedef boost::graph500_iterator<vertex_t, edge_t> Graph500Iter;
+
+    // Random weight generation
+    typedef boost::uniform_int<edge_property_t> distribution_type;
+
+    boost::minstd_rand edge_weight_gen;
+
+    typedef boost::variate_generator<boost::minstd_rand&, distribution_type> gen_type;
+
+    gen_type die_gen(edge_weight_gen, distribution_type(1, max_weight));
+    boost::generator_iterator<gen_type> die(&die_gen);
+
+    // Randome edge generation
+    boost::uniform_int<uint64_t> 
+      rand_64(0, std::numeric_limits<uint64_t>::max());
+
+    addEdges(Graph500Iter(scale, 0, a, b), 
+	     Graph500Iter(scale, n, a, b), die);
+
+    // Finally initialize vertex distance map
+    vertex_distances.resize(vertex_end-vertex_start);
+    vertex_distances.assign((vertex_end-vertex_start), 
+			       std::numeric_limits<vertex_t>::max());
+
+  }
+
   // Get a start iterator to edges going out from vertex v
   OutgoingEdgePair_t out_going_edges(vertex_t v) {
 #ifdef PRINT_DEBUG
@@ -325,9 +493,13 @@ public:
   }
 
   edge_property_t get_edge_weight(EdgeType_t e) {
+    //    std::cout << "e.eid : " << e.eid << " row_indices[0]  : " << row_indices[0]
+    //	      << " row_indices[(vertex_end-vertex_start)-1] : "
+    //	      << row_indices[(vertex_end-vertex_start)]
+    //	      << std::endl;
     assert(e.eid != -1 && 
 	   (row_indices[0] <= e.eid) &&  
-	   (e.eid < row_indices[(vertex_end-vertex_start)-1]));
+	   (e.eid < row_indices[(vertex_end-vertex_start)]));
 
     return weights[(e.eid - row_indices[0])];
   }
@@ -540,6 +712,26 @@ struct partition_server
 			      dc_flush_action);
 
   //==============================================================
+  // Graph generation is distributed. Generate the local part.
+  //==============================================================
+  void generate_local_graph(boost::uint32_t scale,
+			    edge_t n, /* number of edges */
+			    boost::uint32_t max_weight,
+			    uint64_t a, // seeds
+			    uint64_t b) {
+
+    graph_partition.generate_local_graph_partition(scale,
+						   n,
+						   max_weight,
+						   a,
+						   b);
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, generate_local_graph,
+			      dc_local_graph_gen_action);
+
+
+  //==============================================================
   // Reset counters for a new run
   //==============================================================
   void reset_counters() {
@@ -642,6 +834,9 @@ HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_rel
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_terminate_action, partition_terminate_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_reset_counters_action, partition_counter_reset_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_local_graph_gen_action, partition_local_graph_gen_action);
+
+
 
 // The macros below are necessary to generate the code required for exposing
 // our partition type remotely.
@@ -667,6 +862,9 @@ HPX_REGISTER_ACTION(partition_terminate_action);
 
 typedef partition_server::dc_reset_counters_action partition_counter_reset_action;
 HPX_REGISTER_ACTION(partition_counter_reset_action);
+
+typedef partition_server::dc_local_graph_gen_action partition_local_graph_gen_action;
+HPX_REGISTER_ACTION(partition_local_graph_gen_action);
 
 
 // TODO encapsulate parameters
@@ -732,6 +930,21 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     partition_server::dc_terminate_action act;
     return hpx::async(act, get_gid());
   }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Generates the local graph
+  ///////////////////////////////////////////////////////////////////////////
+  hpx::future<void> generate_local_graph(boost::uint32_t scale,
+				      edge_t n, /* number of edges */
+				      boost::uint32_t max_weight,
+				      uint64_t a,
+				      uint64_t b) {
+
+    partition_server::dc_local_graph_gen_action act;
+    return hpx::async(act, get_gid(), scale, n,
+		      max_weight, a, b);
+  }
+
 
   ///////////////////////////////////////////////////////////////////////////
   // Reset counters for next run

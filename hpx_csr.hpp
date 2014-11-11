@@ -153,40 +153,6 @@ public:
   //===========================================
 
   //===========================================
-  // This use to build the histogram.
-  // contains target vertex and edge weight
-  //===========================================
-  struct target_weight {
-    vertex_t target;
-    edge_property_t weight;
-      
-    target_weight(vertex_t t, edge_property_t w) : target(t), weight(w){}
-  };
-
-  // Edges are stored as a multiset in the histogram
-  // sort comparer to maintain edges in order
-  struct tw_comparator {
-    bool operator() (const target_weight& tw1, 
-		     const target_weight& tw2) const {
-      if (tw1.target < tw2.target)
-	return true;
-      else if (tw1.target == tw2.target) {
-	return tw1.weight < tw2.weight;
-      } else {
-	return false;
-      }
-    }
-  };
-
-  // target vertex and edge weight
-  typedef std::multiset<target_weight, tw_comparator> EdgeList_t;
-  // source vertex and list of targets
-  // for (1,3)-w1, (1,5)-w2 we have
-  // 1 - 3-w1, 5-w2 etc ...
-  typedef std::map<vertex_t, EdgeList_t> HistogramMap_t;
-
-
-  //===========================================
   // The constructor.
   //===========================================
   hpx_csr_graph(std::size_t num_vertices,
@@ -350,7 +316,8 @@ public:
       graph_partition_data pd(startv,
 			      endv,
 			      num_vert_per_local,
-			      num_qs);
+			      num_qs,
+			      undirected);
 
       pd.vertex_distances.resize(endv-startv);
       pd.vertex_distances.assign((endv-startv), 
