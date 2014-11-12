@@ -27,6 +27,15 @@
 
 // Whether to verify results (i.e. shortest path or not)
 bool verify = true; 
+// If the completed count is much less than active count
+// we can notify thread to run till it empties the queue
+// for this we are using following boolean
+//bool run_till_empty = false;
+// This is to compare active count and completed
+// count. 
+//int active_to_complete_factor = 2;
+
+
 
 // undirected graph
 bool undirected = true;
@@ -521,6 +530,8 @@ void distributed_control::run_dc(vertex_t source) {
   //  future_collection_t futures;
   // relax source vertex
   // future_collection_t = vector <future <void> >
+  // source message is active, increase active count
+  active_count++;
   (*iteFind).second.relax(vd, partitions);
 
   // termination
@@ -540,13 +551,13 @@ void distributed_control::run_dc(vertex_t source) {
     // We need to add 1 to global count
     // Why ? We match every send with a receive. But for source
     // we do not have a send. Therefore we need add 1 to g_completed
-    g_completed = g_completed + 1;
+    //g_completed = g_completed + 1;
 
-#ifdef PRINT_DEBUG
+    //#ifdef PRINT_DEBUG
     std::cout << "g_completed : " << g_completed
 	      << " g_active : " << g_active
 	      << std::endl;
-#endif
+    //#endif
     
     if (g_completed != g_active) {
       phase = 1;
@@ -601,6 +612,7 @@ void partition_server::relax(const vertex_distance& vd,
 	    << hpx::naming::get_locality_id_from_id(hpx::find_here())
 	    << " for vertex : " << vd.vertex
 	    << " and distance : " << vd.distance
+	    << " thread id : " << hpx::get_worker_thread_num()
 	    << std::endl;
 #endif
 
@@ -616,17 +628,29 @@ void partition_server::relax(const vertex_distance& vd,
     // update distance atomically
     if (graph_partition.set_vertex_distance_atomic
 	(vd.vertex, vd.distance)) {
-
+#ifdef PRINT_DEBUG
+      std::cout << "Inserting to queue vertex : " << vd.vertex
+		<< " distance : " << vd.distance << std::endl;
+#endif
       // Get a random priority queue
       int idx = select_random_q_idx();
       buckets[idx].push(vd);
+    } else {
+      // We did not put vertex to queue
+      // Therefore the vertex-distance should be marked as
+      // completed.
+      // completed processing a message
+      // increase completed count
+      completed_count++;
     }
-
+  } else {
+    // We did not put vertex to queue
+    // Therefore the vertex-distance should be marked as
+    // completed.
+    // completed processing a message
+    // increase completed count
+    completed_count++;
   }
-
-  // We got a message so increase receive count
-  // should be done at the end of the function
-  active_count++;
 }
 
 //======================================================
@@ -666,14 +690,15 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
       // if iteration count is equal to yield count
       // then yield current thread
       if (ite_count == yield_count) {
-	//	std::cout << "Invoking thread yield .......... Reached thread count " << yield_count << std::endl;
+#ifdef PRINT_DEBUG
+	std::cout << "Invoking thread yield .......... Reached thread count " << yield_count << std::endl;
+#endif
 	// reset counter
 	ite_count = 0;
 	hpx::this_thread::yield();
       }
 
       vertex_distance vd;
-
       // lock and pop the element
       {
 	boost::mutex::scoped_lock scopedLock(mutex);
@@ -686,7 +711,7 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	= graph_partition.out_going_edges(vd.vertex);
       graph_partition_data::edge_iterator vebegin = pair.first;
       graph_partition_data::edge_iterator veend = pair.second;
-
+      
       for(; vebegin != veend; ++vebegin) {
 
 #ifdef PRINT_DEBUG
@@ -704,21 +729,35 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 
 	boost::uint32_t target_locality = graph_partition.find_locality_id(target);
 
+	// check whether distance already in target
+	// is better than what we calculated (new_distance)
 	partition_client_map_t::const_iterator iteClient =
 	  pmap.find(target_locality);
 	HPX_ASSERT(iteClient != pmap.end());
-
-	// should be increased before sending the message
-	completed_count++;
-
-	(*iteClient).second.relax(vertex_distance(target, 
-						  new_distance),
-				  pmap);
-
+	
+	if ((*iteClient).second.get_vertex_distance(target) >
+	    new_distance) {
+#ifdef PRINT_DEBUG
+	  std::cout << "Target locality : " << target_locality
+		    << " for vertex : " << target
+		    << " new distance : " << new_distance
+		    << " thread id : " << hpx::get_worker_thread_num()
+		    << std::endl;
+#endif
+	  // We are spawning a new message. Therefore increase
+	  // active count
+	  active_count++;
+	  (*iteClient).second.relax(vertex_distance(target, 
+						    new_distance),
+				    pmap);
+	} 
       }
 
+      // completed processing a message
+      // increase completed count
+      completed_count++;
+    }
   }
-}
 }
 
 typedef std::vector<boost::uint64_t> all_timing_t;

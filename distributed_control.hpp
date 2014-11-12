@@ -505,6 +505,7 @@ public:
   }
 
   vertex_property_t get_vertex_distance(vertex_t vid) {
+    HPX_ASSERT(vertex_start <= vid && vid < vertex_end);
     return vertex_distances[vid-vertex_start];
   }
 
@@ -701,6 +702,17 @@ struct partition_server
 			      dc_relax_action);
 
   //==============================================================
+  // Gets the stored distance for a given vertex
+  //==============================================================
+  vertex_property_t get_vertex_distance(const vertex_t v) {
+    return graph_partition.get_vertex_distance(v);
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, get_vertex_distance,
+			      dc_get_vd_action);
+
+
+  //==============================================================
   // wait till all futures complete their work
   // idx is the queue index to work on
   //==============================================================
@@ -831,6 +843,7 @@ HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
 
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_get_vd_action, partition_get_vd_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_terminate_action, partition_terminate_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_reset_counters_action, partition_counter_reset_action);
@@ -853,6 +866,9 @@ HPX_REGISTER_ACTION(get_data_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
+
+typedef partition_server::dc_get_vd_action partition_get_vd_action;
+HPX_REGISTER_ACTION(partition_get_vd_action);
 
 typedef partition_server::dc_flush_action partition_flush_action;
 HPX_REGISTER_ACTION(partition_flush_action);
@@ -910,6 +926,15 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     partition_server::dc_relax_action act;
     hpx::apply(act, get_gid(), vd, pmap);
   }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Gets the currently stored vertex distance
+  ///////////////////////////////////////////////////////////////////////////
+  vertex_property_t get_vertex_distance(const vertex_t v) const {
+    partition_server::dc_get_vd_action act;
+    return act(get_gid(), v);
+  }
+
 
   ///////////////////////////////////////////////////////////////////////////
   // Invoke remote or local flush
