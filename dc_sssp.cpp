@@ -35,6 +35,13 @@ bool verify = true;
 // count. 
 //int active_to_complete_factor = 2;
 
+// Max number of messages per coalesced buffer
+std::size_t coalesced_message_size;
+
+// whether to sort coalesced buffers
+// default - yes
+bool sort_coalesced_buffer;
+
 
 
 // undirected graph
@@ -531,8 +538,8 @@ void distributed_control::run_dc(vertex_t source) {
   // relax source vertex
   // future_collection_t = vector <future <void> >
   // source message is active, increase active count
-  active_count++;
-  (*iteFind).second.relax(vd, partitions);
+  //prev active_count++;
+  (*iteFind).second.relax(vd);
 
   // termination
   std::vector<hpx::id_type> localities = hpx::find_all_localities();
@@ -597,6 +604,17 @@ void distributed_control::run_dc(vertex_t source) {
 }
 
 //======================================================
+// Receives a vector of messages. The vector is sorted
+// This will inturn call relax.
+//======================================================
+void partition_server::coalesced_relax(const coalesced_message_t& vds) {
+  coalesced_message_t::const_iterator ite = vds.begin();
+  for(; ite != vds.end(); ++ite) {
+    relax(*ite);
+  }
+}
+
+//======================================================
 // The actual relax code. For each adjacent edge we
 // calculate the new distance and compare against
 // existing distance in distance map. If distance is 
@@ -604,8 +622,7 @@ void distributed_control::run_dc(vertex_t source) {
 // and relax all adjacent edges with new distance.
 // Updates to distance map are atomic.
 //======================================================
-void partition_server::relax(const vertex_distance& vd,
-			     const partition_client_map_t& pmap) {
+void partition_server::relax(const vertex_distance& vd) {
 
 #ifdef PRINT_DEBUG
   std::cout << "Invoking relax in locality : "
@@ -641,7 +658,7 @@ void partition_server::relax(const vertex_distance& vd,
       // completed.
       // completed processing a message
       // increase completed count
-      completed_count++;
+      //prev completed_count++;
     }
   } else {
     // We did not put vertex to queue
@@ -649,7 +666,7 @@ void partition_server::relax(const vertex_distance& vd,
     // completed.
     // completed processing a message
     // increase completed count
-    completed_count++;
+    //prev completed_count++;
   }
 }
 
@@ -664,6 +681,63 @@ void partition_server::flush_tasks(int idx,
 }
 
 //======================================================
+// Send coalesced messages. The vd will be put into 
+// appropriate target buffer. If buffer has reached the
+// coalescing size limit messages will be sent.
+//======================================================
+void dc_priority_queue::send(const vertex_distance vd,
+			     boost::uint32_t target_locality,
+			     const partition& partition_client,
+			     coalsced_message_map_t& cmap) {
+
+  coalsced_message_map_t::iterator iteFind = cmap.find(target_locality);
+  HPX_ASSERT(iteFind != cmap.end());
+
+  // put message to buffer
+  (*iteFind).second.push_back(vd);
+
+  // check whether we have reached coalescing limit
+  if ((*iteFind).second.size() == coalesced_message_size) {
+    // do sorting if sorting enabled
+    if (sort_coalesced_buffer) {
+      std::sort((*iteFind).second.begin(), (*iteFind).second.end(), sc);
+    }
+    // send coalesced message
+    partition_client.coalesced_relax((*iteFind).second);
+    (*iteFind).second.clear();
+  }
+}
+
+//======================================================
+// When queues are empty we need to send the data
+// that is not send in buffers. This function will
+// go through all the buffers for all destinations and
+// clear them up.
+//======================================================
+void dc_priority_queue::send_all(coalsced_message_map_t& cmap,
+				 const partition_client_map_t& pmap) {
+
+  coalsced_message_map_t::iterator ite = cmap.begin();
+  for (; ite != cmap.end(); ++ite) {
+    // do sorting if sorting enabled
+    if (sort_coalesced_buffer) {
+      std::sort((*ite).second.begin(), (*ite).second.end(), sc);
+    }
+
+#ifdef PRINT_DEBUG
+    std::cout << "Sending to locality id : " << (*ite).first << std::endl;
+#endif
+    partition_client_map_t::const_iterator iteClient = pmap.find((*ite).first);
+    HPX_ASSERT(iteClient != pmap.end());
+
+    if (!(*ite).second.empty()) {
+      (*iteClient).second.coalesced_relax((*ite).second);
+      (*ite).second.clear();
+    }
+  }
+}
+
+//======================================================
 // This function will go through priority queue
 // found by idx and will relax all edges found in 
 // the queue.
@@ -674,11 +748,28 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 
   boost::uint32_t ite_count = 0;
 
+  // we keep a coalsced buffer for each destination
+  coalsced_message_map_t cmap;
+  // for each locality initialize a coalesced buffer
+  std::vector<hpx::naming::id_type> localities =
+      hpx::find_all_localities();
+
+  std::vector<hpx::naming::id_type>::iterator iteLoc = localities.begin();
+  for (; iteLoc != localities.end(); ++iteLoc) {
+    boost::uint32_t locId = hpx::naming::get_locality_id_from_id(*iteLoc);
+    cmap.insert(std::make_pair(locId, coalesced_message_t()));
+  }
+
   while(!termination) {
     // If queue is empty wait till an element is pushed
     {
       boost::mutex::scoped_lock scopedLock(mutex);
       if (pq.empty()) {
+	// send all remaining buffers
+#ifdef PRINT_DEBUG
+	std::cout << "Sending all messages .... " << std::endl;
+#endif
+	send_all(cmap, pmap);
 	cv.wait(scopedLock);
       }
     }
@@ -698,12 +789,15 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	hpx::this_thread::yield();
       }
 
+      bool was_empty = false;
       vertex_distance vd;
       // lock and pop the element
       {
 	boost::mutex::scoped_lock scopedLock(mutex);
 	vd = pq.top();
 	pq.pop();
+
+	was_empty = pq.empty();
       }
     
       // relax vd
@@ -746,16 +840,23 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 #endif
 	  // We are spawning a new message. Therefore increase
 	  // active count
-	  active_count++;
-	  (*iteClient).second.relax(vertex_distance(target, 
-						    new_distance),
-				    pmap);
+	  //prev active_count++;
+	  send(vertex_distance(target, new_distance),
+	       target_locality,
+	       (*iteClient).second,
+	       cmap);
+	  //	  (*iteClient).second.relax(vertex_distance(target, 
+	  //					    new_distance));
 	} 
+      }
+
+      if(was_empty) {
+	completed_count++;
       }
 
       // completed processing a message
       // increase completed count
-      completed_count++;
+      //prev completed_count++;
     }
   }
 }
@@ -809,6 +910,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
   boost::uint32_t max_weight = vm["max_weight"].as<boost::uint32_t>();
   boost::uint32_t num_sources = vm["num_sources"].as<boost::uint32_t>();
   boost::uint32_t yield_count = vm["yield_count"].as<boost::uint32_t>();
+  coalesced_message_size = vm["coalescing_size"].as<boost::uint32_t>();
 
   if (!vm.count("verify"))
     verify = false;
@@ -924,6 +1026,8 @@ int main(int argc, char* argv[])
      "The number of queues per each locality.")
     ("num_sources", value<boost::uint32_t>()->default_value(18),
      "The number of sources to run.")
+    ("coalescing_size", value<boost::uint32_t>()->default_value(1000),
+     "The maximum messages to be coalesced.")
     ("yield_count", value<boost::uint32_t>()->default_value(18),
      "After how many counts the flushing thread should yield, so that it give space to run other threads.")
     ("verify", "Verify results")

@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <queue>
+#include <algorithm>
 
 #include <hpx/hpx_init.hpp>
 #include <hpx/hpx.hpp>
@@ -127,6 +128,13 @@ struct default_comparer {
   }
 };
 
+// Comparer for sorting coalesced messages
+struct sort_comparer {
+  bool operator()(const vertex_distance& vd1, const vertex_distance& vd2) {
+    return vd1.distance < vd2.distance;
+  }
+} sc;
+
 
 struct dc_priority_queue;
 // Priority queue type
@@ -134,6 +142,9 @@ typedef std::priority_queue<vertex_distance,
 			    std::vector<vertex_distance>, default_comparer > priority_q_t;
 // All priority queues
 typedef std::vector<dc_priority_queue> all_q_t;
+
+// Coalesced message type
+typedef std::vector<vertex_distance> coalesced_message_t;
 //====================================================================//
 
 
@@ -505,6 +516,12 @@ public:
   }
 
   vertex_property_t get_vertex_distance(vertex_t vid) {
+#ifdef PRINT_DEBUG
+    std::cout << "vertex_start : " << vertex_start
+	      << " vid : " << vid
+	      << " vertex_end : " << vertex_end << std::endl;
+#endif
+
     HPX_ASSERT(vertex_start <= vid && vid < vertex_end);
     return vertex_distances[vid-vertex_start];
   }
@@ -599,7 +616,7 @@ public:
 
 typedef std::vector< hpx::future <void> > future_collection_t;
 typedef hpx::lcos::local::spinlock mutex_type;
-
+typedef std::map<boost::uint32_t, coalesced_message_t> coalsced_message_map_t;
 //==========================================//
 // completed_count - stores the number of messages
 // sent through flush_task
@@ -615,7 +632,9 @@ std::atomic_int_fast64_t completed_count(0); // Source does not send a message
 ///////////////////////////////////////////////////////////////////////////////
 struct dc_priority_queue {
   
-  dc_priority_queue():termination(false){}
+  dc_priority_queue():
+    termination(false)
+  {}
 
   dc_priority_queue(const dc_priority_queue& other):
     termination(other.termination),
@@ -626,6 +645,12 @@ struct dc_priority_queue {
     // lock the queue and insert element
     {
       boost::mutex::scoped_lock scopedLock(mutex);
+      
+      // increase active count if q is empty
+      if (pq.empty()) {
+	active_count++;
+      }
+
       pq.push(vd);
     }
 
@@ -636,6 +661,14 @@ struct dc_priority_queue {
   void handle_queue(const partition_client_map_t& pmap,
 		    graph_partition_data& graph_partition,
 		    const boost::uint32_t yield_count);
+
+  void send_all(coalsced_message_map_t& cmap,
+		const partition_client_map_t& pmap);
+
+  void send(const vertex_distance vd,
+	    boost::uint32_t target_locality,
+	    const partition& partition_client,
+	    coalsced_message_map_t& cmap);
 
   // Terminates the algorithms
   void terminate() {
@@ -696,10 +729,20 @@ struct partition_server
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
-  void relax(const vertex_distance& vd, const partition_client_map_t& pmap);
+  void relax(const vertex_distance& vd);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, relax,
 			      dc_relax_action);
+
+  //==============================================================
+  // Send coalesced messages
+  // In this we will relax each vertex parallely
+  //==============================================================
+  void coalesced_relax(const coalesced_message_t& vds);
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, coalesced_relax,
+			      dc_coalesced_relax_action);
+
 
   //==============================================================
   // Gets the stored distance for a given vertex
@@ -843,6 +886,7 @@ HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
 
 
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_coalesced_relax_action, partition_coalesced_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_get_vd_action, partition_get_vd_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_terminate_action, partition_terminate_action);
@@ -866,6 +910,9 @@ HPX_REGISTER_ACTION(get_data_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
+
+typedef partition_server::dc_coalesced_relax_action partition_coalesced_relax_action;
+HPX_REGISTER_ACTION(partition_coalesced_relax_action);
 
 typedef partition_server::dc_get_vd_action partition_get_vd_action;
 HPX_REGISTER_ACTION(partition_get_vd_action);
@@ -918,14 +965,36 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     return hpx::async(act, get_gid());
   }
 
+  // NOT USED YET
+  /* void send(vertex_distance const& vd) {
+    messages.push_back(vd);
+
+    if (messages.size() == coalesced_message_size) {
+      // do sorting if enabled
+      if(sort_coalesced_buffer) {
+	std::sort(messages.begin(), messages.end(), sc);
+      }
+      coalesced_relax(messages);
+      messages.clear();
+    }
+    }*/
+
   ///////////////////////////////////////////////////////////////////////////
   // Invoke remote relax
   ///////////////////////////////////////////////////////////////////////////
-  void relax(vertex_distance const& vd,
-	     const partition_client_map_t& pmap) const {
+  void relax(vertex_distance const& vd) const {
     partition_server::dc_relax_action act;
-    hpx::apply(act, get_gid(), vd, pmap);
+    hpx::apply(act, get_gid(), vd);
   }
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Invoke remote coalesced relax
+  ///////////////////////////////////////////////////////////////////////////
+  void coalesced_relax(const coalesced_message_t vds) const {
+    partition_server::dc_coalesced_relax_action act;
+    hpx::apply(act, get_gid(), vds);
+  }
+
 
   ///////////////////////////////////////////////////////////////////////////
   // Gets the currently stored vertex distance
@@ -979,7 +1048,8 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     act(get_gid());
   }
 
-
+  /*private:
+    coalesced_message_t messages;*/
 };
 
 //====================================================================//
