@@ -40,12 +40,18 @@ std::size_t coalesced_message_size;
 
 // whether to sort coalesced buffers
 // default - yes
-bool sort_coalesced_buffer;
-
-
+bool sort_coalesced_buffer = true;
 
 // undirected graph
 bool undirected = true;
+
+// work stats
+#ifdef WORK_STATS
+boost::int64_t total_useful = 0;
+boost::int64_t total_useless = 0;
+boost::int64_t total_rejected = 0;
+boost::int64_t total_invalidated = 0;
+#endif
 
 struct distributed_control {
   
@@ -538,7 +544,6 @@ void distributed_control::run_dc(vertex_t source) {
   // relax source vertex
   // future_collection_t = vector <future <void> >
   // source message is active, increase active count
-  //prev active_count++;
   (*iteFind).second.relax(vd);
 
   // termination
@@ -601,6 +606,19 @@ void distributed_control::run_dc(vertex_t source) {
   if (verify) {
     verify_results();
   }
+
+  // collect work stats if enabled
+#ifdef WORK_STATS
+  total_useful = hpx::lcos::reduce<total_useful_work_action>
+      (localities, std::plus<boost::int64_t>()).get();
+  total_useless = hpx::lcos::reduce<total_useless_work_action>
+      (localities, std::plus<boost::int64_t>()).get(); 
+  total_invalidated = hpx::lcos::reduce<total_invalidated_work_action>
+      (localities, std::plus<boost::int64_t>()).get();
+  total_rejected = hpx::lcos::reduce<total_rejected_work_action>
+      (localities, std::plus<boost::int64_t>()).get();  
+#endif
+
 }
 
 //======================================================
@@ -653,20 +671,15 @@ void partition_server::relax(const vertex_distance& vd) {
       int idx = select_random_q_idx();
       buckets[idx].push(vd);
     } else {
-      // We did not put vertex to queue
-      // Therefore the vertex-distance should be marked as
-      // completed.
-      // completed processing a message
-      // increase completed count
-      //prev completed_count++;
+#ifdef WORK_STATS
+      useless++;
+#endif
     }
   } else {
-    // We did not put vertex to queue
-    // Therefore the vertex-distance should be marked as
-    // completed.
-    // completed processing a message
-    // increase completed count
-    //prev completed_count++;
+    //TODO not sure
+#ifdef WORK_STATS
+      useless++;
+#endif
   }
 }
 
@@ -840,23 +853,20 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 #endif
 	  // We are spawning a new message. Therefore increase
 	  // active count
-	  //prev active_count++;
 	  send(vertex_distance(target, new_distance),
 	       target_locality,
 	       (*iteClient).second,
 	       cmap);
-	  //	  (*iteClient).second.relax(vertex_distance(target, 
-	  //					    new_distance));
-	} 
+        } else {
+#ifdef WORK_STATS
+          rejected++;
+#endif
+        } 
       }
 
       if(was_empty) {
 	completed_count++;
       }
-
-      // completed processing a message
-      // increase completed count
-      //prev completed_count++;
     }
   }
 }
@@ -873,7 +883,11 @@ void print_summary_results(
 			   boost::uint32_t sc,
 			   boost::uint32_t mw,
 			   boost::uint32_t n_qs,
-			   boost::uint32_t num_sources) {
+			   boost::uint32_t num_sources,
+			   boost::int64_t cum_useful = 0,
+			   boost::int64_t cum_useless = 0,
+			   boost::int64_t cum_invalidated = 0,
+			   boost::int64_t cum_rejected = 0) {
 
   // calculate avg timing
   all_timing_t::const_iterator ite = all_timings.begin();
@@ -891,9 +905,33 @@ void print_summary_results(
   std::string const max_weight = boost::str(boost::format("%u,") % mw);
   std::string const num_qs = boost::str(boost::format("%u ") % n_qs);
   std::string const num_srces = boost::str(boost::format("%u ") % num_sources);
+  std::string const coal_sz = boost::str(boost::format("%u ") % coalesced_message_size);
 
-  std::cout << (boost::format("Total time to execute DC : %-6s (Per Source Avg : %.14g), Localities : %-6s, OS Threads : %-6s, Scale : %-6s, Max Weight : %-6s, Number of Queues : %-6s, Number of Sources : %-6s\n")
-		 % (total_time / 1e9) % (avg_time / 1e9) % num_localities % num_os_threads % sc % mw % n_qs % num_sources) << std::flush;
+  std::string sorting = "true";
+  if (!sort_coalesced_buffer)
+    sorting = "false";
+
+  std::cout << "Total time to execute DC : " << (total_time / 1e9)
+	    << " (Per Source Avg : " << ((total_time / tot_readings) / 1e9) << ")"
+	    << ", Localities : " << num_localities
+	    << ", OS Threads : " << num_os_threads
+	    << ", Scale : " << sc
+	    << ", Max Weight : " << mw
+	    << ", Number of Queues : " << n_qs
+	    << ", Number of Sources : " << num_sources
+	    << ", Coalescing Size : " << coalesced_message_size
+	    << ", Outbuffer Sorting : " << sorting
+	    << std::endl;
+
+#ifdef WORK_STATS
+  std::cout << "Work Stats (per source) - Useful : " << (cum_useful / tot_readings)
+	    << ", Useless : " << (cum_useless / tot_readings)
+	    << ", Invalidated :" << (cum_invalidated / tot_readings)
+	    << ", Rejected :" << (cum_rejected / tot_readings)
+	    << ", Rejected/Useful Ratio :" << ((double)cum_rejected / (double)cum_useful)
+	    << ", Invalidated/Useful Ratio :" << ((double)cum_invalidated / (double)cum_useful)
+	    << std::endl;
+#endif
 }
 
 
@@ -915,11 +953,17 @@ int hpx_main(boost::program_options::variables_map& vm) {
   if (!vm.count("verify"))
     verify = false;
 
+  if (vm.count("disable_sort"))
+    sort_coalesced_buffer = false;
+
+
   std::cout << "[Input Read] Graph scale : " << scale 
 	    << ", queues : " << queues 
 	    << ", max_weight : " << max_weight 
 	    << ", num_sources : " << num_sources 
 	    << ", yield_count : " << yield_count 
+	    << ", coalescing_size : " << coalesced_message_size
+	    << ", disable_sort : " << sort_coalesced_buffer 
 	    << ", verify results : " << verify << std::endl;
 
   vertex_t source = 0;
@@ -952,6 +996,13 @@ int hpx_main(boost::program_options::variables_map& vm) {
   
   all_timing_t all_timings;
 
+#ifdef WORK_STATS
+  boost::int64_t cum_total_useful = 0;
+  boost::int64_t cum_total_useless = 0;
+  boost::int64_t cum_total_rejected = 0;
+  boost::int64_t cum_total_invalidated = 0;
+#endif
+
 #ifndef DC_TEST_CASE
   for (boost::uint32_t i=0; i<num_sources; ++i) {
     // Select a random source vertex
@@ -963,13 +1014,14 @@ int hpx_main(boost::program_options::variables_map& vm) {
 	      << ", num_queues : " << queues
 	      << ", yield count : " << yield_count
 	      << ", max_weight : " << max_weight
+	      << ", coalescing_size : " << coalesced_message_size
+	      << ", disable_sort : " << sort_coalesced_buffer 
 	      << ", source : " << source 
 	      << ", iteration : " << i << std::endl;
     
     boost::uint64_t before = hpx::util::high_resolution_clock::now();
     dc.run_dc(source);
-    boost::uint64_t after = hpx::util::high_resolution_clock::now();
-    
+    boost::uint64_t after = hpx::util::high_resolution_clock::now();    
 
     // check the total visited count
     boost::uint32_t tot_visited = dc.count_total_visited_vertices();
@@ -985,10 +1037,26 @@ int hpx_main(boost::program_options::variables_map& vm) {
 	      << ", num_queues : " << queues
 	      << ", yield count : " << yield_count
 	      << ", max_weight : " << max_weight
+	      << ", coalescing_size : " << coalesced_message_size
+	      << ", disable_sort : " << sort_coalesced_buffer 
 	      << ", source : " << source 
 	      << ", total visited count : " << tot_visited
 	      << ", iteration : " << i 
 	      << " is : " << (elapsed / 1e9) << std::endl;
+
+// work stats
+#ifdef WORK_STATS
+    std::cout << "Work statistics - Useful Work : " << total_useful
+	      << ", Useless Work : " << total_useless
+	      << ", Rejected Work : " << total_rejected
+	      << ", Invalidated Work : " << total_invalidated
+	      << std::endl;
+
+    cum_total_useful += total_useful;
+    cum_total_useless += total_useless;
+    cum_total_rejected += total_rejected;
+    cum_total_invalidated += total_invalidated;
+#endif
 
     all_timings.push_back(elapsed);
 
@@ -999,6 +1067,19 @@ int hpx_main(boost::program_options::variables_map& vm) {
     boost::uint64_t const num_worker_threads = hpx::get_num_worker_threads();
     hpx::future<boost::uint32_t> locs = hpx::get_num_localities();
 
+#ifdef WORK_STATS
+    print_summary_results(locs.get(),
+			  num_worker_threads,
+			  all_timings,
+			  scale,
+			  max_weight,
+			  queues,
+			  num_sources,
+			  cum_total_useful,
+			  cum_total_useless,
+			  cum_total_invalidated,
+			  cum_total_rejected);
+#else
     print_summary_results(locs.get(),
 			  num_worker_threads,
 			  all_timings,
@@ -1006,6 +1087,7 @@ int hpx_main(boost::program_options::variables_map& vm) {
 			  max_weight,
 			  queues,
 			  num_sources);
+#endif
 
   
     return hpx::finalize();
@@ -1028,9 +1110,10 @@ int main(int argc, char* argv[])
      "The number of sources to run.")
     ("coalescing_size", value<boost::uint32_t>()->default_value(1000),
      "The maximum messages to be coalesced.")
-    ("yield_count", value<boost::uint32_t>()->default_value(18),
+    ("yield_count", value<boost::uint32_t>()->default_value(100),
      "After how many counts the flushing thread should yield, so that it give space to run other threads.")
     ("verify", "Verify results")
+    ("disable_sort", "Disable sorting sending message buffer")
     ;
 
   std::cout << "Inside main ...." << std::endl;

@@ -56,6 +56,16 @@ typedef std::map<boost::uint32_t, partition> partition_client_map_t;
 
 typedef std::vector<int> graph_array_t;
 
+//==========================================//
+// Work stats
+#ifdef WORK_STATS
+std::atomic_int_fast64_t useful(0);
+std::atomic_int_fast64_t invalidated(0);
+std::atomic_int_fast64_t useless(0);
+std::atomic_int_fast64_t rejected(0);
+#endif
+//==========================================//
+
 
 //===========================================
 // This use to build the histogram.
@@ -542,6 +552,9 @@ public:
       old_dist = boost::parallel::val_compare_and_swap
 	(&vertex_distances[localvid], old_dist, new_distance);
       if (last_old_dist == old_dist) {
+#ifdef WORK_STATS
+	if(old_dist < std::numeric_limits<vertex_t>::max()) invalidated++;
+#endif
 	return true;
       }
     }
@@ -652,6 +665,10 @@ struct dc_priority_queue {
       }
 
       pq.push(vd);
+
+#ifdef WORK_STATS
+      useful++;
+#endif
     }
 
     // notify waiting threads
@@ -804,6 +821,14 @@ struct partition_server
       vertex_distances.
       assign(graph_partition.vertex_distances.size(),
 	     std::numeric_limits<vertex_t>::max());
+
+    // reset work stats
+#ifdef WORK_STATS
+    useful = 0;
+    useless = 0;
+    rejected = 0;
+    invalidated = 0;
+#endif
   }
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, reset_counters,
@@ -860,6 +885,7 @@ private:
 // wait till all futures complete their work
 // idx is the queue index to work on
 //==============================================================
+// Total completed count reduction
 boost::int64_t total_completed_count() {
 
   boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
@@ -872,6 +898,7 @@ typedef std::plus<boost::int64_t> std_plus_type;
 HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_completed_count_action, std_plus_type)
 HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
 
+// Total active count reduction
 boost::int64_t total_active_count() {
 
   boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
@@ -883,8 +910,58 @@ typedef std::plus<boost::int64_t> std_plus_type;
 HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_active_count_action, std_plus_type)
 HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
 
+#ifdef WORK_STATS
+// Total useful work reduction
+boost::int64_t total_useful_work() {
+
+  boost::uint64_t use = useful.load(std::memory_order_relaxed);
+  return use;
+}
+
+HPX_PLAIN_ACTION(total_useful_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useful_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_useful_work_action, std_plus_type)
+
+// Total useless work reduction
+boost::int64_t total_useless_work() {
+
+  boost::uint64_t uless = useless.load(std::memory_order_relaxed);
+  return uless;
+}
+
+HPX_PLAIN_ACTION(total_useless_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useless_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_useless_work_action, std_plus_type)
+
+// Total invalidated work reduction
+boost::int64_t total_invalidated_work() {
+
+  boost::uint64_t invalid = invalidated.load(std::memory_order_relaxed);
+  return invalid;
+}
+
+HPX_PLAIN_ACTION(total_invalidated_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_invalidated_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_invalidated_work_action, std_plus_type)
+
+// Total rejected work reduction
+boost::int64_t total_rejected_work() {
+
+  boost::uint64_t reject = rejected.load(std::memory_order_relaxed);
+  return reject;
+}
+
+HPX_PLAIN_ACTION(total_rejected_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
+#endif
 
 
+//============== Non Reduction Action Definitions===================//
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_coalesced_relax_action, partition_coalesced_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_get_vd_action, partition_get_vd_action);
