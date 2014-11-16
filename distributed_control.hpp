@@ -660,9 +660,9 @@ struct dc_priority_queue {
       boost::mutex::scoped_lock scopedLock(mutex);
       
       // increase active count if q is empty
-      if (pq.empty()) {
+      /*if (pq.empty()) {
 	active_count++;
-      }
+	}*/
 
       pq.push(vd);
 

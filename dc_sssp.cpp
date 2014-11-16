@@ -544,6 +544,7 @@ void distributed_control::run_dc(vertex_t source) {
   // relax source vertex
   // future_collection_t = vector <future <void> >
   // source message is active, increase active count
+  active_count++;
   (*iteFind).second.relax(vd);
 
   // termination
@@ -671,11 +672,25 @@ void partition_server::relax(const vertex_distance& vd) {
       int idx = select_random_q_idx();
       buckets[idx].push(vd);
     } else {
+      // We did not put vertex to queue
+      // Therefore the vertex-distance should be marked as
+      // completed.
+      // completed processing a message
+      // increase completed count
+      completed_count++;
+
 #ifdef WORK_STATS
       useless++;
 #endif
     }
   } else {
+    // We did not put vertex to queue
+    // Therefore the vertex-distance should be marked as
+    // completed.
+    // completed processing a message
+    // increase completed count
+    completed_count++;
+
     //TODO not sure
 #ifdef WORK_STATS
       useless++;
@@ -715,6 +730,8 @@ void dc_priority_queue::send(const vertex_distance vd,
     if (sort_coalesced_buffer) {
       std::sort((*iteFind).second.begin(), (*iteFind).second.end(), sc);
     }
+
+    active_count += (*iteFind).second.size(); // atomic addition
     // send coalesced message
     partition_client.coalesced_relax((*iteFind).second);
     (*iteFind).second.clear();
@@ -744,6 +761,7 @@ void dc_priority_queue::send_all(coalsced_message_map_t& cmap,
     HPX_ASSERT(iteClient != pmap.end());
 
     if (!(*ite).second.empty()) {
+      active_count += (*ite).second.size(); // atomic addition
       (*iteClient).second.coalesced_relax((*ite).second);
       (*ite).second.clear();
     }
@@ -864,11 +882,25 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
         } 
       }
 
-      if(was_empty) {
-	completed_count++;
-      }
+      // if(was_empty) {
+      completed_count++;
+	//}
     }
   }
+
+  // Termination took place;                                                                                                                                                             
+  // All buffers must be empty                                                                                                                                                           
+  coalsced_message_map_t::iterator ite = cmap.begin();
+  for (; ite != cmap.end(); ++ite) {
+    if (!(*ite).second.empty()) {
+      std::cout << "All buffers must be empty " << std::endl;
+      HPX_ASSERT(false);
+    }
+  }
+
+  // All queues must be empty                                                                                                                                                            
+  HPX_ASSERT(pq.empty());
+
 }
 
 typedef std::vector<boost::uint64_t> all_timing_t;
