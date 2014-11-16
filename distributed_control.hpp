@@ -51,6 +51,8 @@
 #include "boost/graph/parallel/thread_support.hpp"
 #include "common_types.hpp"
 
+boost::uint32_t total_q_count = 0;
+
 struct partition;
 typedef std::map<boost::uint32_t, partition> partition_client_map_t;
 
@@ -329,7 +331,6 @@ public:
 
     row_indices.resize((vertex_end - vertex_start) + 1);
     vertex_distances.resize(vertex_end - vertex_start);
-
   }
 
   graph_partition_data(int _vstart, 
@@ -639,6 +640,51 @@ typedef std::map<boost::uint32_t, coalesced_message_t> coalsced_message_map_t;
 //==========================================//  
 std::atomic_int_fast64_t active_count(0);
 std::atomic_int_fast64_t completed_count(0); // Source does not send a message
+boost::uint32_t empty_q_count = 0; 
+
+hpx::lcos::local::condition_variable q_count_cv;
+boost::mutex q_count_mutex;
+
+void increase_empty_q_count() {
+  boost::mutex::scoped_lock scopedLock(q_count_mutex); 
+  empty_q_count++;
+
+#ifdef PRINT_DEBUG
+  std::cout << "[inc] Rank " << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	    << " The total q count " << total_q_count 
+	    << " The empty q count : " << empty_q_count << std::endl;
+#endif
+
+  if (empty_q_count == total_q_count) {
+    // notify all threads waiting on this condition variable
+    q_count_cv.notify_all();
+  }
+}
+
+void wait_till_all_qs_empty() {
+  boost::mutex::scoped_lock scopedLock(q_count_mutex);
+
+#ifdef PRINT_DEBUG
+  std::cout << "[wait] Rank " << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	    << " The total q count " << total_q_count 
+	    << " The empty q count : " << empty_q_count << std::endl;
+#endif
+
+  if (empty_q_count != total_q_count) {
+    q_count_cv.wait(scopedLock);
+  }
+}
+
+void decrease_empty_q_count() {
+  boost::mutex::scoped_lock scopedLock(q_count_mutex);
+  empty_q_count--;
+
+#ifdef PRINT_DEBUG
+  std::cout << "[dec] Rank " << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	    << " The total q count " << total_q_count 
+	    << " The empty q count : " << empty_q_count << std::endl;
+#endif
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Represents a single priority queue
@@ -871,6 +917,9 @@ private:
 
     // create queues
     buckets.resize(graph_partition.num_queues);
+
+    // initialize total q count
+    total_q_count = graph_partition.num_queues;
   }
 
   // Finds a random index value to find a queue
@@ -888,6 +937,7 @@ private:
 // Total completed count reduction
 boost::int64_t total_completed_count() {
 
+  wait_till_all_qs_empty();
   boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
   return cc;
 }
@@ -901,6 +951,7 @@ HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
 // Total active count reduction
 boost::int64_t total_active_count() {
 
+  wait_till_all_qs_empty();
   boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
   return ac;
 }

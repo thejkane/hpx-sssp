@@ -801,7 +801,11 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	std::cout << "Sending all messages .... " << std::endl;
 #endif
 	send_all(cmap, pmap);
+	// increase empty q count
+	increase_empty_q_count();
 	cv.wait(scopedLock);
+	// decrease empty q count
+	decrease_empty_q_count();
       }
     }
     
