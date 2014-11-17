@@ -339,19 +339,21 @@ public:
     
     boost::uint32_t visited = 0;
 
+    std::vector< hpx::future<boost::uint32_t> > visited_counts;
+
     partition_client_map_t::iterator ite = partitions.begin();
     for (; ite != partitions.end(); ++ite) {
       // What we get from get_data is a future.
       // We have to call get to get the actual graph_partition_data
       // and then call print on it
-      graph_partition_data pd = (*ite).second.get_data().get();
+      visited_counts.push_back((*ite).second.calculate_visited_vertices());
+    }
 
-      int num_local_verts = (pd.vertex_end - pd.vertex_start) - 1;
-      for(int i=0; i < num_local_verts; ++i) {
-	if (pd.vertex_distances[i] < std::numeric_limits<vertex_t>::max()) {
-	  ++visited;
-	}
-      }
+    std::vector< hpx::future<boost::uint32_t> >::iterator iteFutures 
+      = visited_counts.begin();
+
+    for(; iteFutures != visited_counts.end(); ++iteFutures) {
+      visited += (*iteFutures).get();
     }
     
     std::cout << "Total visited vertices : " << visited << std::endl;

@@ -798,6 +798,25 @@ struct partition_server
 			      dc_relax_action);
 
   //==============================================================
+  // Count locally visited vertices
+  //==============================================================
+  boost::uint32_t count_visited_vertices() {
+    boost::uint32_t visited = 0;
+    int num_local_verts = (graph_partition.vertex_end - graph_partition.vertex_start) - 1;
+    for(int i=0; i < num_local_verts; ++i) {
+      if (graph_partition.vertex_distances[i] < std::numeric_limits<vertex_t>::max()) {
+	++visited;
+      }
+    }
+
+    return visited;
+  }
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, count_visited_vertices,
+			      dc_count_visited_vertices_action);
+
+
+  //==============================================================
   // Send coalesced messages
   // In this we will relax each vertex parallely
   //==============================================================
@@ -1011,9 +1030,9 @@ HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type
 HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
 #endif
 
-
 //============== Non Reduction Action Definitions===================//
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_count_visited_vertices_action, partition_count_visited_vertices_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_coalesced_relax_action, partition_coalesced_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_get_vd_action, partition_get_vd_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_flush_action, partition_flush_action);
@@ -1038,6 +1057,9 @@ HPX_REGISTER_ACTION(get_data_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
+
+typedef partition_server::dc_count_visited_vertices_action partition_count_visited_vertices_action;
+HPX_REGISTER_ACTION(partition_count_visited_vertices_action);
 
 typedef partition_server::dc_coalesced_relax_action partition_coalesced_relax_action;
 HPX_REGISTER_ACTION(partition_coalesced_relax_action);
@@ -1143,6 +1165,15 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     for (int i=0; i<num_qs; ++i) {
       hpx::apply(act, get_gid(), i, pmap, yield_count);
     }
+  }
+
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Calculate locally visited vertices
+  ///////////////////////////////////////////////////////////////////////////
+  hpx::future<boost::uint32_t> calculate_visited_vertices() {
+    partition_server::dc_count_visited_vertices_action act;
+    return hpx::async(act, get_gid());
   }
 
   ///////////////////////////////////////////////////////////////////////////
