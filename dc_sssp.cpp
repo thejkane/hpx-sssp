@@ -360,69 +360,19 @@ public:
     return visited;
   }
 
+
   //========================================================
   // Verify generated distances
   //========================================================
   void verify_results() {
     std::cout << "===================== Verifying Results ==============================" << std::endl;
+    std::vector< hpx::future<void> > futures;
     partition_client_map_t::iterator ite = partitions.begin();
     for (; ite != partitions.end(); ++ite) {
-      std::cout << "Partition locality : " << 
-	hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) << std::endl;
-      // What we get from get_data is a future.
-      // We have to call get to get the actual graph_partition_data
-      // and then call print on it
-      graph_partition_data pd = (*ite).second.get_data().get();
-
-      graph_partition_data::vertex_iterator ite =
-	pd.vertices_begin();
-      for(; ite != pd.vertices_end(); ++ite) {
-	graph_partition_data::OutgoingEdgePair_t p = 
-	  pd.out_going_edges(*ite);
-	graph_partition_data::edge_iterator eite =
-	  p.first;
-	
-	for (; eite != p.second; ++eite) {
-	  EdgeType_t e = *eite;
-
-	  // edge weight starting from vertex *ite
-	  edge_property_t w = pd.get_edge_weight(e);
-	  
-	  // distance for source
-	  vertex_property_t vs = pd.get_vertex_distance(*ite);
-
-	  // get the target vertex; but target vertex might be in a 
-	  // different locality. Therefore we need to find the appropriate
-	  // locality and find graph data
-
-	  // Find the locality of the target
-	  boost::uint32_t locality = find_locality_id(e.second, 
-					      num_vert_per_local);
-	  // Get the partition the belongs to locality
-	  partition_client_map_t::iterator iteFind = partitions.find(locality);
-	  HPX_ASSERT(iteFind != partitions.end());
-
-	  // get partition data and get the distance
-	  graph_partition_data remote_pd = (*iteFind).second.get_data().get();
-
-	  // distance for target
-	  vertex_property_t vt = remote_pd.get_vertex_distance(e.second);
-	  
-	  if (vt > boost::closed_plus<vertex_property_t>()(vs, w)) {
-	    // failure
-	    std::cout << "The target vertex : " << e.second
-		      << " distance : " << vt
-		      << " and source vertex : " << e.first 
-		      << " distance : " << vs << " + "
-		      << " weight : " << w
-		      << " does not match." 
-		      << std::endl;
-	    HPX_ASSERT(false);
-	  }
-	}
-	  
-      }
+      futures.push_back((*ite).second.verify_distance_results(partitions));
     }
+
+    hpx::wait_all(futures);
   }
 
   void print_results() {
@@ -512,6 +462,62 @@ public:
     }
   }
 };
+
+
+//============================================
+// Verifies whether calculated distances 
+// are correct.
+//============================================
+void partition_server::verify_partition_results(const partition_client_map_t& partitions) {
+
+  std::cout << "Verifying partition : " << hpx::naming::get_locality_id_from_id(hpx::find_here())
+	    << std::endl;
+
+  graph_partition_data::vertex_iterator ite =
+    graph_partition.vertices_begin();
+  for(; ite != graph_partition.vertices_end(); ++ite) {
+    graph_partition_data::OutgoingEdgePair_t p = 
+      graph_partition.out_going_edges(*ite);
+    graph_partition_data::edge_iterator eite =
+      p.first;
+	
+    for (; eite != p.second; ++eite) {
+      EdgeType_t e = *eite;
+
+      // edge weight starting from vertex *ite
+      edge_property_t w = graph_partition.get_edge_weight(e);
+	  
+      // distance for source
+      vertex_property_t vs = graph_partition.get_vertex_distance(*ite);
+
+      // get the target vertex; but target vertex might be in a 
+      // different locality. Therefore we need to find the appropriate
+      // locality and find graph data
+
+      // Find the locality of the target
+      boost::uint32_t locality = graph_partition.find_locality_id(e.second);
+      // Get the partition the belongs to locality
+      partition_client_map_t::const_iterator iteFind = partitions.find(locality);
+      HPX_ASSERT(iteFind != partitions.end());
+
+      // distance for target
+      vertex_property_t vt = (*iteFind).second.get_vertex_distance(e.second);
+	  
+      if (vt > boost::closed_plus<vertex_property_t>()(vs, w)) {
+	// failure
+	std::cout << "The target vertex : " << e.second
+		  << " distance : " << vt
+		  << " and source vertex : " << e.first 
+		  << " distance : " << vs << " + "
+		  << " weight : " << w
+		  << " does not match." 
+		  << std::endl;
+	HPX_ASSERT(false);
+      }
+    }
+	  
+  }
+}
 
 
 //======================================================

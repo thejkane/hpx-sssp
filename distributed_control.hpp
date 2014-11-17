@@ -815,6 +815,13 @@ struct partition_server
   HPX_DEFINE_COMPONENT_ACTION(partition_server, count_visited_vertices,
 			      dc_count_visited_vertices_action);
 
+  //==============================================================
+  // Validate calculated distances are correct.
+  //==============================================================
+  void verify_partition_results(const partition_client_map_t& partitions);
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, verify_partition_results,
+			      dc_verify_partition_results_action);
 
   //==============================================================
   // Send coalesced messages
@@ -1030,8 +1037,10 @@ HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type
 HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
 #endif
 
+
 //============== Non Reduction Action Definitions===================//
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_verify_partition_results_action, partition_verify_partition_results_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_count_visited_vertices_action, partition_count_visited_vertices_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_coalesced_relax_action, partition_coalesced_relax_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_get_vd_action, partition_get_vd_action);
@@ -1057,6 +1066,9 @@ HPX_REGISTER_ACTION(get_data_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
+
+typedef partition_server::dc_verify_partition_results_action partition_verify_partition_results_action;
+HPX_REGISTER_ACTION(partition_verify_partition_results_action);
 
 typedef partition_server::dc_count_visited_vertices_action partition_count_visited_vertices_action;
 HPX_REGISTER_ACTION(partition_count_visited_vertices_action);
@@ -1165,6 +1177,15 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     for (int i=0; i<num_qs; ++i) {
       hpx::apply(act, get_gid(), i, pmap, yield_count);
     }
+  }
+
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Verify final distances calculated
+  ///////////////////////////////////////////////////////////////////////////
+  hpx::future<void> verify_distance_results(const partition_client_map_t& pmap) {
+    partition_server::dc_verify_partition_results_action act;
+    return hpx::async(act, get_gid(), pmap);
   }
 
 
