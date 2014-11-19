@@ -155,6 +155,15 @@ typedef std::priority_queue<vertex_distance,
 // All priority queues
 typedef std::vector<dc_priority_queue> all_q_t;
 
+//==========================================//
+// Stores all priority queues
+// This is ugly. But cant help; cos - HPX
+// reduction support at component level is not
+// working as expected.
+//==========================================//
+all_q_t buckets;
+
+
 // Coalesced message type
 typedef std::vector<vertex_distance> coalesced_message_t;
 //====================================================================//
@@ -693,7 +702,19 @@ struct dc_priority_queue {
   
   dc_priority_queue():
     termination(false)
-  {}
+  {
+  
+    // for each locality initialize a coalesced buffer
+    std::vector<hpx::naming::id_type> localities =
+      hpx::find_all_localities();
+
+    std::vector<hpx::naming::id_type>::iterator iteLoc = localities.begin();
+    for (; iteLoc != localities.end(); ++iteLoc) {
+      boost::uint32_t locId = hpx::naming::get_locality_id_from_id(*iteLoc);
+      cmap.insert(std::make_pair(locId, coalesced_message_t()));
+    }
+
+  }
 
   dc_priority_queue(const dc_priority_queue& other):
     termination(other.termination),
@@ -703,13 +724,7 @@ struct dc_priority_queue {
   void push(const vertex_distance& vd) {
     // lock the queue and insert element
     {
-      boost::mutex::scoped_lock scopedLock(mutex);
-      
-      // increase active count if q is empty
-      /*if (pq.empty()) {
-	active_count++;
-	}*/
-
+      boost::mutex::scoped_lock scopedLock(mutex);      
       pq.push(vd);
 
 #ifdef WORK_STATS
@@ -725,13 +740,11 @@ struct dc_priority_queue {
 		    graph_partition_data& graph_partition,
 		    const boost::uint32_t yield_count);
 
-  void send_all(coalsced_message_map_t& cmap,
-		const partition_client_map_t& pmap);
+  void send_all(const partition_client_map_t& pmap);
 
   void send(const vertex_distance vd,
 	    boost::uint32_t target_locality,
-	    const partition& partition_client,
-	    coalsced_message_map_t& cmap);
+	    const partition& partition_client);
 
   // Terminates the algorithms
   void terminate() {
@@ -741,6 +754,17 @@ struct dc_priority_queue {
 
   void reset() {
     termination = false;
+    
+    {
+      boost::mutex::scoped_lock scopedLock(cmap_mutex);      
+      // No residues from previous runs
+      // Just make sure
+      coalsced_message_map_t::iterator ite = cmap.begin();
+      for (; ite != cmap.end(); ++ite) {
+	HPX_ASSERT((*ite).second.empty());
+      }
+    }
+
   }
 
 private:
@@ -748,7 +772,23 @@ private:
   priority_q_t pq;
   hpx::lcos::local::condition_variable cv;
   boost::mutex mutex;
+  coalsced_message_map_t cmap;
+  boost::mutex cmap_mutex;
 };
+
+
+//===================================
+// Sends all remaining messages in 
+// buffers.
+//===================================
+void send_all_remaining(const partition_client_map_t& partitions) {
+  // all qs are empty
+  // send all remaining messages: but need to lock
+  all_q_t::iterator ite = buckets.begin();
+  for (; ite != buckets.end(); ++ite) {
+    (*ite).send_all(partitions);
+  }
+}
 
 
 // This is the server side representation of the data. We expose this as a HPX
@@ -927,11 +967,6 @@ private:
   graph_partition_data graph_partition;
   
   //==========================================//
-  // Stores all priority queues
-  //==========================================//
-  all_q_t buckets;
-
-  //==========================================//
   // To select a pq randomly
   //==========================================//
   boost::random::mt19937 gen;
@@ -955,88 +990,6 @@ private:
   }
 
 };
-
-//==============================================================
-// wait till all futures complete their work
-// idx is the queue index to work on
-//==============================================================
-// Total completed count reduction
-boost::int64_t total_completed_count() {
-
-  wait_till_all_qs_empty();
-  boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
-  return cc;
-}
-
-
-HPX_PLAIN_ACTION(total_completed_count);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_completed_count_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
-
-// Total active count reduction
-boost::int64_t total_active_count() {
-
-  wait_till_all_qs_empty();
-  boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
-  return ac;
-}
-
-HPX_PLAIN_ACTION(total_active_count);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_active_count_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
-
-#ifdef WORK_STATS
-// Total useful work reduction
-boost::int64_t total_useful_work() {
-
-  boost::uint64_t use = useful.load(std::memory_order_relaxed);
-  return use;
-}
-
-HPX_PLAIN_ACTION(total_useful_work);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useful_work_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_useful_work_action, std_plus_type)
-
-// Total useless work reduction
-boost::int64_t total_useless_work() {
-
-  boost::uint64_t uless = useless.load(std::memory_order_relaxed);
-  return uless;
-}
-
-HPX_PLAIN_ACTION(total_useless_work);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useless_work_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_useless_work_action, std_plus_type)
-
-// Total invalidated work reduction
-boost::int64_t total_invalidated_work() {
-
-  boost::uint64_t invalid = invalidated.load(std::memory_order_relaxed);
-  return invalid;
-}
-
-HPX_PLAIN_ACTION(total_invalidated_work);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_invalidated_work_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_invalidated_work_action, std_plus_type)
-
-// Total rejected work reduction
-boost::int64_t total_rejected_work() {
-
-  boost::uint64_t reject = rejected.load(std::memory_order_relaxed);
-  return reject;
-}
-
-HPX_PLAIN_ACTION(total_rejected_work);
-typedef std::plus<boost::int64_t> std_plus_type;
-HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type)
-HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
-#endif
-
 
 //============== Non Reduction Action Definitions===================//
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
@@ -1249,6 +1202,89 @@ namespace hpx { namespace traits {
     };
     }}
 //====================================================================//
+
+//==============================================================
+// wait till all futures complete their work
+// idx is the queue index to work on
+//==============================================================
+// Total completed count reduction
+boost::int64_t total_completed_count(const partition_client_map_t& partitions) {
+
+  wait_till_all_qs_empty();
+  send_all_remaining(partitions);
+  boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
+  return cc;
+}
+
+
+HPX_PLAIN_ACTION(total_completed_count);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_completed_count_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
+
+// Total active count reduction
+boost::int64_t total_active_count(const partition_client_map_t& partitions) {
+
+  wait_till_all_qs_empty();
+  send_all_remaining(partitions);
+  boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
+  return ac;
+}
+
+HPX_PLAIN_ACTION(total_active_count);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_active_count_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_active_count_action, std_plus_type)
+
+#ifdef WORK_STATS
+// Total useful work reduction
+boost::int64_t total_useful_work() {
+
+  boost::uint64_t use = useful.load(std::memory_order_relaxed);
+  return use;
+}
+
+HPX_PLAIN_ACTION(total_useful_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useful_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_useful_work_action, std_plus_type)
+
+// Total useless work reduction
+boost::int64_t total_useless_work() {
+
+  boost::uint64_t uless = useless.load(std::memory_order_relaxed);
+  return uless;
+}
+
+HPX_PLAIN_ACTION(total_useless_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_useless_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_useless_work_action, std_plus_type)
+
+// Total invalidated work reduction
+boost::int64_t total_invalidated_work() {
+
+  boost::uint64_t invalid = invalidated.load(std::memory_order_relaxed);
+  return invalid;
+}
+
+HPX_PLAIN_ACTION(total_invalidated_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_invalidated_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_invalidated_work_action, std_plus_type)
+
+// Total rejected work reduction
+boost::int64_t total_rejected_work() {
+
+  boost::uint64_t reject = rejected.load(std::memory_order_relaxed);
+  return reject;
+}
+
+HPX_PLAIN_ACTION(total_rejected_work);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
+#endif
 
 
 #endif

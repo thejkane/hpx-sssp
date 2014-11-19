@@ -565,9 +565,9 @@ void distributed_control::run_dc(vertex_t source) {
 
   while(!terminate) {
     boost::int64_t g_completed = hpx::lcos::reduce<total_completed_count_action>
-      (localities, std::plus<boost::int64_t>()).get();
+      (localities, std::plus<boost::int64_t>(), partitions).get();
     boost::int64_t g_active = hpx::lcos::reduce<total_active_count_action>
-      (localities, std::plus<boost::int64_t>()).get();
+      (localities, std::plus<boost::int64_t>(), partitions).get();
 
     // We need to add 1 to global count
     // Why ? We match every send with a receive. But for source
@@ -723,9 +723,14 @@ void partition_server::flush_tasks(int idx,
 //======================================================
 void dc_priority_queue::send(const vertex_distance vd,
 			     boost::uint32_t target_locality,
-			     const partition& partition_client,
-			     coalsced_message_map_t& cmap) {
+			     const partition& partition_client) {
 
+  // We need to interleave send and send_all. i.e. when we 
+  // are doing a send_all we shouldnt be doing a send
+  // also this doesnt create too much contention as we have destination
+  // buffers per each priority queue. So when sending data we only have
+  // single thread working inside this function.
+  boost::mutex::scoped_lock scopedLock(cmap_mutex);      
   coalsced_message_map_t::iterator iteFind = cmap.find(target_locality);
   HPX_ASSERT(iteFind != cmap.end());
 
@@ -752,8 +757,10 @@ void dc_priority_queue::send(const vertex_distance vd,
 // go through all the buffers for all destinations and
 // clear them up.
 //======================================================
-void dc_priority_queue::send_all(coalsced_message_map_t& cmap,
-				 const partition_client_map_t& pmap) {
+void dc_priority_queue::send_all(const partition_client_map_t& pmap) {
+
+  // See for explanation in send function
+  boost::mutex::scoped_lock scopedLock(cmap_mutex);      
 
   coalsced_message_map_t::iterator ite = cmap.begin();
   for (; ite != cmap.end(); ++ite) {
@@ -787,28 +794,11 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 
   boost::uint32_t ite_count = 0;
 
-  // we keep a coalsced buffer for each destination
-  coalsced_message_map_t cmap;
-  // for each locality initialize a coalesced buffer
-  std::vector<hpx::naming::id_type> localities =
-      hpx::find_all_localities();
-
-  std::vector<hpx::naming::id_type>::iterator iteLoc = localities.begin();
-  for (; iteLoc != localities.end(); ++iteLoc) {
-    boost::uint32_t locId = hpx::naming::get_locality_id_from_id(*iteLoc);
-    cmap.insert(std::make_pair(locId, coalesced_message_t()));
-  }
-
   while(!termination) {
     // If queue is empty wait till an element is pushed
     {
       boost::mutex::scoped_lock scopedLock(mutex);
       if (pq.empty()) {
-	// send all remaining buffers
-#ifdef PRINT_DEBUG
-	std::cout << "Sending all messages .... " << std::endl;
-#endif
-	send_all(cmap, pmap);
 	// increase empty q count
 	increase_empty_q_count();
 	cv.wait(scopedLock);
@@ -885,8 +875,7 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	  // active count
 	  send(vertex_distance(target, new_distance),
 	       target_locality,
-	       (*iteClient).second,
-	       cmap);
+	       (*iteClient).second);
         } else {
 #ifdef WORK_STATS
           rejected++;
