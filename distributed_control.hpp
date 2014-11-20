@@ -37,6 +37,7 @@
 #include <boost/thread/locks.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/range/adaptor/map.hpp>
+#include <boost/ptr_container/ptr_vector.hpp>
 
 // For graph generation
 #include <boost/random/linear_congruential.hpp>
@@ -703,17 +704,6 @@ struct dc_priority_queue {
   dc_priority_queue():
     termination(false)
   {
-  
-    // for each locality initialize a coalesced buffer
-    std::vector<hpx::naming::id_type> localities =
-      hpx::find_all_localities();
-
-    std::vector<hpx::naming::id_type>::iterator iteLoc = localities.begin();
-    for (; iteLoc != localities.end(); ++iteLoc) {
-      boost::uint32_t locId = hpx::naming::get_locality_id_from_id(*iteLoc);
-      cmap.insert(std::make_pair(locId, coalesced_message_t()));
-    }
-
   }
 
   dc_priority_queue(const dc_priority_queue& other):
@@ -740,9 +730,25 @@ struct dc_priority_queue {
 		    graph_partition_data& graph_partition,
 		    const boost::uint32_t yield_count);
 
-  void send_all(const partition_client_map_t& pmap);
+  void static init() {
+    // for each locality initialize a coalesced buffer
+    std::vector<hpx::naming::id_type> localities =
+      hpx::find_all_localities();
 
-  void send(const vertex_distance vd,
+    std::vector<hpx::naming::id_type>::iterator iteLoc = localities.begin();
+    for (; iteLoc != localities.end(); ++iteLoc) {
+      boost::uint32_t locId = hpx::naming::get_locality_id_from_id(*iteLoc);
+      cmap.insert(std::make_pair(locId, coalesced_message_t()));
+      std::cout << "pushing to mutexes ... " << std::endl;
+      cmap_mutexes.push_back(new boost::mutex);
+    }
+    
+    //    cmap_mutexes.resize(localities.size());
+  }
+
+  void static send_all(const partition_client_map_t& pmap);
+
+  void static send(const vertex_distance vd,
 	    boost::uint32_t target_locality,
 	    const partition& partition_client);
 
@@ -756,7 +762,7 @@ struct dc_priority_queue {
     termination = false;
     
     {
-      boost::mutex::scoped_lock scopedLock(cmap_mutex);      
+      //boost::mutex::scoped_lock scopedLock(cmap_mutex);      
       // No residues from previous runs
       // Just make sure
       coalsced_message_map_t::iterator ite = cmap.begin();
@@ -772,8 +778,8 @@ private:
   priority_q_t pq;
   hpx::lcos::local::condition_variable cv;
   boost::mutex mutex;
-  coalsced_message_map_t cmap;
-  boost::mutex cmap_mutex;
+  static coalsced_message_map_t cmap;
+  static boost::ptr_vector<boost::mutex> cmap_mutexes;
 };
 
 
@@ -981,6 +987,8 @@ private:
 
     // initialize total q count
     total_q_count = graph_partition.num_queues;
+    
+    dc_priority_queue::init();
   }
 
   // Finds a random index value to find a queue
@@ -1181,8 +1189,6 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     act(get_gid());
   }
 
-  /*private:
-    coalesced_message_t messages;*/
 };
 
 //====================================================================//

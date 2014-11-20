@@ -717,6 +717,13 @@ void partition_server::flush_tasks(int idx,
 }
 
 //======================================================
+// Initializing static values
+
+coalsced_message_map_t dc_priority_queue::cmap;
+boost::ptr_vector<boost::mutex> dc_priority_queue::cmap_mutexes;
+
+
+//======================================================
 // Send coalesced messages. The vd will be put into 
 // appropriate target buffer. If buffer has reached the
 // coalescing size limit messages will be sent.
@@ -730,7 +737,8 @@ void dc_priority_queue::send(const vertex_distance vd,
   // also this doesnt create too much contention as we have destination
   // buffers per each priority queue. So when sending data we only have
   // single thread working inside this function.
-  boost::mutex::scoped_lock scopedLock(cmap_mutex);      
+  //  std::cout << "target_locality : " << target_locality << std::endl;
+  boost::mutex::scoped_lock scopedLock(cmap_mutexes[target_locality]);      
   coalsced_message_map_t::iterator iteFind = cmap.find(target_locality);
   HPX_ASSERT(iteFind != cmap.end());
 
@@ -760,10 +768,9 @@ void dc_priority_queue::send(const vertex_distance vd,
 void dc_priority_queue::send_all(const partition_client_map_t& pmap) {
 
   // See for explanation in send function
-  boost::mutex::scoped_lock scopedLock(cmap_mutex);      
-
   coalsced_message_map_t::iterator ite = cmap.begin();
   for (; ite != cmap.end(); ++ite) {
+    boost::mutex::scoped_lock scopedLock(cmap_mutexes[(*ite).first]);      
     // do sorting if sorting enabled
     if (sort_coalesced_buffer) {
       std::sort((*ite).second.begin(), (*ite).second.end(), sc);
