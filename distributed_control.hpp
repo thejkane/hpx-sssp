@@ -57,6 +57,11 @@ boost::uint32_t total_q_count = 0;
 struct partition;
 typedef std::map<boost::uint32_t, partition> partition_client_map_t;
 
+partition_client_map_t global_partitions;
+
+// stores all component ids
+typedef std::vector<hpx::naming::id_type> component_ids_t;
+
 typedef std::vector<int> graph_array_t;
 
 //==========================================//
@@ -726,8 +731,7 @@ struct dc_priority_queue {
     cv.notify_all();
   }
 
-  void handle_queue(const partition_client_map_t& pmap,
-		    graph_partition_data& graph_partition,
+  void handle_queue(graph_partition_data& graph_partition,
 		    const boost::uint32_t yield_count);
 
   void static init() {
@@ -746,7 +750,7 @@ struct dc_priority_queue {
     //    cmap_mutexes.resize(localities.size());
   }
 
-  void static send_all(const partition_client_map_t& pmap);
+  void static send_all();
 
   void static send(const vertex_distance vd,
 	    boost::uint32_t target_locality,
@@ -787,12 +791,12 @@ private:
 // Sends all remaining messages in 
 // buffers.
 //===================================
-void send_all_remaining(const partition_client_map_t& partitions) {
+void send_all_remaining() {
   // all qs are empty
   // send all remaining messages: but need to lock
   all_q_t::iterator ite = buckets.begin();
   for (; ite != buckets.end(); ++ite) {
-    (*ite).send_all(partitions);
+    (*ite).send_all();
   }
 }
 
@@ -835,6 +839,16 @@ struct partition_server
   HPX_DEFINE_COMPONENT_CONST_DIRECT_ACTION(partition_server, get_data, get_data_action);
 
   //==============================================================
+  // Creates remote partition clients.
+  //==============================================================
+  void create_partition_clients();
+
+
+  HPX_DEFINE_COMPONENT_ACTION(partition_server, create_partition_clients,
+			      dc_create_partition_clients_action);
+
+
+  //==============================================================
   // Experimenting... First with chaotic algorithm.
   // In this we will relax each vertex parallely
   //==============================================================
@@ -864,7 +878,7 @@ struct partition_server
   //==============================================================
   // Validate calculated distances are correct.
   //==============================================================
-  void verify_partition_results(const partition_client_map_t& partitions);
+  void verify_partition_results();
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, verify_partition_results,
 			      dc_verify_partition_results_action);
@@ -895,7 +909,6 @@ struct partition_server
   // idx is the queue index to work on
   //==============================================================
   void flush_tasks(int idx,
-		   const partition_client_map_t& pmap,
 		   const boost::uint32_t yield_count);
 
   HPX_DEFINE_COMPONENT_ACTION(partition_server, flush_tasks,
@@ -1001,6 +1014,7 @@ private:
 
 //============== Non Reduction Action Definitions===================//
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_relax_action, partition_relax_action);
+HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_create_partition_clients_action, partition_create_partition_clients_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_verify_partition_results_action, partition_verify_partition_results_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_count_visited_vertices_action, partition_count_visited_vertices_action);
 HPX_REGISTER_ACTION_DECLARATION(partition_server::dc_coalesced_relax_action, partition_coalesced_relax_action);
@@ -1024,6 +1038,9 @@ HPX_REGISTER_MINIMAL_COMPONENT_FACTORY(partition_server_type, partition_server);
 // invocation.
 typedef partition_server::get_data_action get_data_action;
 HPX_REGISTER_ACTION(get_data_action);
+
+typedef partition_server::dc_create_partition_clients_action partition_create_partition_clients_action;
+HPX_REGISTER_ACTION(partition_create_partition_clients_action);
 
 typedef partition_server::dc_relax_action partition_relax_action;
 HPX_REGISTER_ACTION(partition_relax_action);
@@ -1055,6 +1072,7 @@ HPX_REGISTER_ACTION(partition_local_graph_gen_action);
 
 // TODO encapsulate parameters
 
+char const* base_name = "/partition";
 ///////////////////////////////////////////////////////////////////////////////
 // This is a client side helper class allowing to hide some of the tedious
 // boilerplate.
@@ -1067,12 +1085,23 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   // new instance will be initialized from the given partition_data.
   partition(hpx::id_type where, graph_partition_data const& data)
     : base_type(hpx::new_colocated<partition_server>(where, data))
-  {}
+  {
+    hpx::register_id_with_basename(base_name, 
+				   get_gid(),
+				   hpx::naming::get_locality_id_from_id(where));
+  }
 
   // Attach a future representing a (possibly remote) partition.
   partition(hpx::future<hpx::id_type> && id)
     : base_type(std::move(id))
   {}
+
+  // Attach a future representing a (possibly remote) partition.
+  partition(hpx::id_type where)
+    : base_type(hpx::find_id_from_basename(base_name, 
+					   hpx::naming::get_locality_id_from_id(where)))
+  {}
+
 
   // Unwrap a future<partition> (a partition already holds a future to the
   // id of the referenced object, thus unwrapping accesses this inner future).
@@ -1132,11 +1161,10 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   // Invoke remote or local flush
   ///////////////////////////////////////////////////////////////////////////
   void start_flush_tasks(int num_qs,
-			 const partition_client_map_t& pmap,
 			 const boost::uint32_t yield_count) const {
     partition_server::dc_flush_action act;
     for (int i=0; i<num_qs; ++i) {
-      hpx::apply(act, get_gid(), i, pmap, yield_count);
+      hpx::apply(act, get_gid(), i, yield_count);
     }
   }
 
@@ -1144,9 +1172,9 @@ struct partition : hpx::components::client_base<partition, partition_server> {
   ///////////////////////////////////////////////////////////////////////////
   // Verify final distances calculated
   ///////////////////////////////////////////////////////////////////////////
-  hpx::future<void> verify_distance_results(const partition_client_map_t& pmap) {
+  hpx::future<void> verify_distance_results() {
     partition_server::dc_verify_partition_results_action act;
-    return hpx::async(act, get_gid(), pmap);
+    return hpx::async(act, get_gid());
   }
 
 
@@ -1178,6 +1206,15 @@ struct partition : hpx::components::client_base<partition, partition_server> {
     partition_server::dc_local_graph_gen_action act;
     return hpx::async(act, get_gid(), scale, n,
 		      max_weight, a, b);
+  }
+
+
+  ///////////////////////////////////////////////////////////////////////////
+  // Create partition client map
+  ///////////////////////////////////////////////////////////////////////////
+  void create_partition_clients() {
+    partition_server::dc_create_partition_clients_action act;
+    act(get_gid());
   }
 
 
@@ -1214,10 +1251,10 @@ namespace hpx { namespace traits {
 // idx is the queue index to work on
 //==============================================================
 // Total completed count reduction
-boost::int64_t total_completed_count(const partition_client_map_t& partitions) {
+boost::int64_t total_completed_count() {
 
   wait_till_all_qs_empty();
-  send_all_remaining(partitions);
+  send_all_remaining();
   boost::uint64_t cc = completed_count.load(std::memory_order_relaxed);
   return cc;
 }
@@ -1229,10 +1266,10 @@ HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_completed_count_action, std_plus_ty
 HPX_REGISTER_REDUCE_ACTION(total_completed_count_action, std_plus_type)
 
 // Total active count reduction
-boost::int64_t total_active_count(const partition_client_map_t& partitions) {
+boost::int64_t total_active_count() {
 
   wait_till_all_qs_empty();
-  send_all_remaining(partitions);
+  send_all_remaining();
   boost::uint64_t ac = active_count.load(std::memory_order_relaxed);
   return ac;
 }

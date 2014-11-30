@@ -56,11 +56,6 @@ boost::int64_t total_invalidated = 0;
 struct distributed_control {
   
 private:
-  // create a partition client array
-  // creates a partition for each locality
-  // map key - locality id, value - remote partition
-  partition_client_map_t partitions;
-
   // The graph scale
   boost::int32_t scale;  
 
@@ -158,6 +153,9 @@ public:
     uint64_t a = rand_64(gen);
     uint64_t b = rand_64(gen);
 
+    partition_client_map_t local_partitions;
+    component_ids_t component_ids;
+
     for(std::size_t i=0; i<num_locs; ++i) {
       vertex_t startv = i*num_vert_per_local;
 
@@ -191,10 +189,17 @@ public:
 					       a,
 					       b));
 
-      partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
+      local_partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
+
+      component_ids.push_back(p.get_gid());
     }
 
     hpx::wait_all(futures);
+
+    partition_client_map_t::iterator ite = local_partitions.begin();
+    for(; ite != local_partitions.end(); ++ite) {
+      (*ite).second.create_partition_clients();
+    }
   }
 
   //========================================================
@@ -237,8 +242,8 @@ public:
   // Reset remote and local counters for a next run
   //========================================================
   void reset_counters() {
-    partition_client_map_t::iterator ite = partitions.begin();
-    for (; ite != partitions.end(); ++ite) {
+    partition_client_map_t::iterator ite = global_partitions.begin();
+    for (; ite != global_partitions.end(); ++ite) {
       (*ite).second.reset_counters();
     }
   }
@@ -320,17 +325,17 @@ public:
 	hpx::naming::get_locality_id_from_id(localities[i]) << std::endl;
       //pd.print();
       partition p(localities[i], pd);
-      partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
+      global_partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id(localities[i]), p));
     }
   }
 
   //========================================================
   // Partition the graph for the running localities
   //========================================================
-  void partition_graph(hpx_csr_graph& g) {
+  /*  void partition_graph(hpx_csr_graph& g) {
     g.partition_graph(partitions, num_qs, num_vert_per_local);
     HPX_ASSERT(num_vert_per_local != 0);
-  }
+    }*/
 
   //========================================================
   // Counts total number of vertices visited
@@ -341,8 +346,8 @@ public:
 
     std::vector< hpx::future<boost::uint32_t> > visited_counts;
 
-    partition_client_map_t::iterator ite = partitions.begin();
-    for (; ite != partitions.end(); ++ite) {
+    partition_client_map_t::iterator ite = global_partitions.begin();
+    for (; ite != global_partitions.end(); ++ite) {
       // What we get from get_data is a future.
       // We have to call get to get the actual graph_partition_data
       // and then call print on it
@@ -367,9 +372,9 @@ public:
   void verify_results() {
     std::cout << "===================== Verifying Results ==============================" << std::endl;
     std::vector< hpx::future<void> > futures;
-    partition_client_map_t::iterator ite = partitions.begin();
-    for (; ite != partitions.end(); ++ite) {
-      futures.push_back((*ite).second.verify_distance_results(partitions));
+    partition_client_map_t::iterator ite = global_partitions.begin();
+    for (; ite != global_partitions.end(); ++ite) {
+      futures.push_back((*ite).second.verify_distance_results());
     }
 
     hpx::wait_all(futures);
@@ -377,8 +382,8 @@ public:
 
   void print_results() {
     std::cout << "===================== Printing Results ==============================" << std::endl;
-    partition_client_map_t::iterator ite = partitions.begin();
-    for (; ite != partitions.end(); ++ite) {
+    partition_client_map_t::iterator ite = global_partitions.begin();
+    for (; ite != global_partitions.end(); ++ite) {
       std::cout << "Partition locality : " << 
 	hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) << std::endl;
       // What we get from get_data is a future.
@@ -400,8 +405,8 @@ public:
   // prints partition data
   //========================================================
   void print_all_partitions() {
-    partition_client_map_t::iterator ite = partitions.begin();
-    for (; ite != partitions.end(); ++ite) {
+    partition_client_map_t::iterator ite = global_partitions.begin();
+    for (; ite != global_partitions.end(); ++ite) {
       HPX_ASSERT(hpx::naming::get_locality_id_from_id((*ite).second.get_gid()) == (*ite).first);
 
       std::cout << "Partition locality : " << 
@@ -464,11 +469,24 @@ public:
 };
 
 
+//==============================================================
+// Creates remote partition clients.
+//==============================================================
+void partition_server::create_partition_clients() {
+  std::vector<hpx::id_type> localities = hpx::find_all_localities();
+  std::vector<hpx::id_type>::iterator ite = localities.begin();
+  for(; ite != localities.end(); ++ite) {
+    global_partitions.insert(std::make_pair(hpx::naming::get_locality_id_from_id((*ite)), 
+					    partition(*ite)));
+  }
+}
+
+
 //============================================
 // Verifies whether calculated distances 
 // are correct.
 //============================================
-void partition_server::verify_partition_results(const partition_client_map_t& partitions) {
+void partition_server::verify_partition_results() {
 
   std::cout << "Verifying partition : " << hpx::naming::get_locality_id_from_id(hpx::find_here())
 	    << std::endl;
@@ -497,8 +515,8 @@ void partition_server::verify_partition_results(const partition_client_map_t& pa
       // Find the locality of the target
       boost::uint32_t locality = graph_partition.find_locality_id(e.second);
       // Get the partition the belongs to locality
-      partition_client_map_t::const_iterator iteFind = partitions.find(locality);
-      HPX_ASSERT(iteFind != partitions.end());
+      partition_client_map_t::const_iterator iteFind = global_partitions.find(locality);
+      HPX_ASSERT(iteFind != global_partitions.end());
 
       // distance for target
       vertex_property_t vt = (*iteFind).second.get_vertex_distance(e.second);
@@ -529,9 +547,9 @@ void distributed_control::run_dc(vertex_t source) {
   
   // start flush tasks
   partition_client_map_t::iterator ite = 
-    partitions.begin();
-  for(; ite != partitions.end(); ++ite) {
-    (*ite).second.start_flush_tasks(num_qs, partitions, yield_count);
+    global_partitions.begin();
+  for(; ite != global_partitions.end(); ++ite) {
+    (*ite).second.start_flush_tasks(num_qs, yield_count);
   }
 
   // Find the locality of the source
@@ -545,8 +563,8 @@ void distributed_control::run_dc(vertex_t source) {
   // root locality. Therefore we need to bind and invoke the
   // function.
   // Get the partition the belongs to locality
-  partition_client_map_t::iterator iteFind = partitions.find(locality);
-  HPX_ASSERT(iteFind != partitions.end());
+  partition_client_map_t::iterator iteFind = global_partitions.find(locality);
+  HPX_ASSERT(iteFind != global_partitions.end());
 
   //  future_collection_t futures;
   // relax source vertex
@@ -565,9 +583,9 @@ void distributed_control::run_dc(vertex_t source) {
 
   while(!terminate) {
     boost::int64_t g_completed = hpx::lcos::reduce<total_completed_count_action>
-      (localities, std::plus<boost::int64_t>(), partitions).get();
+      (localities, std::plus<boost::int64_t>()).get();
     boost::int64_t g_active = hpx::lcos::reduce<total_active_count_action>
-      (localities, std::plus<boost::int64_t>(), partitions).get();
+      (localities, std::plus<boost::int64_t>()).get();
 
     // We need to add 1 to global count
     // Why ? We match every send with a receive. But for source
@@ -600,7 +618,7 @@ void distributed_control::run_dc(vertex_t source) {
 
   std::vector< hpx::future<void> > terminating_ps;
   // invoke termination parallely
-  for(ite = partitions.begin(); ite != partitions.end(); ++ite) {
+  for(ite = global_partitions.begin(); ite != global_partitions.end(); ++ite) {
     terminating_ps.push_back((*ite).second.terminate());
   }
 
@@ -710,10 +728,9 @@ void partition_server::relax(const vertex_distance& vd) {
 // Starts flush tasks
 //======================================================
 void partition_server::flush_tasks(int idx,
-				   const partition_client_map_t& pmap,
 				   const boost::uint32_t yield_count) {  
   HPX_ASSERT(0 <= idx && idx < graph_partition.num_queues);
-  buckets[idx].handle_queue(pmap, graph_partition, yield_count);
+  buckets[idx].handle_queue(graph_partition, yield_count);
 }
 
 //======================================================
@@ -765,7 +782,7 @@ void dc_priority_queue::send(const vertex_distance vd,
 // go through all the buffers for all destinations and
 // clear them up.
 //======================================================
-void dc_priority_queue::send_all(const partition_client_map_t& pmap) {
+void dc_priority_queue::send_all() {
 
   // See for explanation in send function
   coalsced_message_map_t::iterator ite = cmap.begin();
@@ -779,8 +796,8 @@ void dc_priority_queue::send_all(const partition_client_map_t& pmap) {
 #ifdef PRINT_DEBUG
     std::cout << "Sending to locality id : " << (*ite).first << std::endl;
 #endif
-    partition_client_map_t::const_iterator iteClient = pmap.find((*ite).first);
-    HPX_ASSERT(iteClient != pmap.end());
+    partition_client_map_t::const_iterator iteClient = global_partitions.find((*ite).first);
+    HPX_ASSERT(iteClient != global_partitions.end());
 
     if (!(*ite).second.empty()) {
       active_count += (*ite).second.size(); // atomic addition
@@ -795,8 +812,7 @@ void dc_priority_queue::send_all(const partition_client_map_t& pmap) {
 // found by idx and will relax all edges found in 
 // the queue.
 //======================================================
-void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
-				     graph_partition_data& graph_partition,
+void dc_priority_queue::handle_queue(graph_partition_data& graph_partition,
 				     const boost::uint32_t yield_count) {
 
   boost::uint32_t ite_count = 0;
@@ -866,8 +882,8 @@ void dc_priority_queue::handle_queue(const partition_client_map_t& pmap,
 	// check whether distance already in target
 	// is better than what we calculated (new_distance)
 	partition_client_map_t::const_iterator iteClient =
-	  pmap.find(target_locality);
-	HPX_ASSERT(iteClient != pmap.end());
+	  global_partitions.find(target_locality);
+	HPX_ASSERT(iteClient != global_partitions.end());
 	
 	if ((*iteClient).second.get_vertex_distance(target) >
 	    new_distance) {
