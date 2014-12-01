@@ -16,6 +16,8 @@
 #ifndef HPX_DC_SSSP
 #define HPX_DC_SSSP
 
+#define WORK_STATS 1
+
 // This is needed to increase the number of 
 // parameters to new operator
 #define HPX_LIMIT 6
@@ -71,6 +73,8 @@ std::atomic_int_fast64_t useful(0);
 std::atomic_int_fast64_t invalidated(0);
 std::atomic_int_fast64_t useless(0);
 std::atomic_int_fast64_t rejected(0);
+std::atomic_int_fast64_t partial_buffers(0);
+std::atomic_int_fast64_t full_buffers(0);
 #endif
 //==========================================//
 
@@ -946,6 +950,11 @@ struct partition_server
     for(int i=0; i<graph_partition.num_queues; ++i) {
       buckets[i].reset();
     }
+    
+#ifdef PRINT_DEBUG
+    std::cout << "@@@@@@@@@@@@@@@@ Inside Reset - Before resetting @@@@@@@@@@@@@@" << std::endl;
+    std::cout << count_visited_vertices() << std::endl;
+#endif
 
     // reset vertex distance
     graph_partition.
@@ -953,12 +962,19 @@ struct partition_server
       assign(graph_partition.vertex_distances.size(),
 	     std::numeric_limits<vertex_t>::max());
 
+#ifdef PRINT_DEBUG
+    std::cout << count_visited_vertices() << std::endl;
+    std::cout << "@@@@@@@@@@@@@@@@ Inside Reset - After resetting @@@@@@@@@@@@@@" << std::endl;
+#endif
+
     // reset work stats
 #ifdef WORK_STATS
     useful = 0;
     useless = 0;
     rejected = 0;
     invalidated = 0;
+    partial_buffers = 0;
+    full_buffers = 0;
 #endif
   }
 
@@ -1327,6 +1343,32 @@ HPX_PLAIN_ACTION(total_rejected_work);
 typedef std::plus<boost::int64_t> std_plus_type;
 HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_rejected_work_action, std_plus_type)
 HPX_REGISTER_REDUCE_ACTION(total_rejected_work_action, std_plus_type)
+
+// Total full buffer
+boost::int64_t total_full_buffer() {
+
+  boost::uint64_t full = full_buffers.load(std::memory_order_relaxed);
+  return full;
+}
+
+HPX_PLAIN_ACTION(total_full_buffer);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_full_buffer_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_full_buffer_action, std_plus_type)
+
+// Total partial buffer
+boost::int64_t total_partial_buffer() {
+
+  boost::uint64_t partial = partial_buffers.load(std::memory_order_relaxed);
+  return partial;
+}
+
+HPX_PLAIN_ACTION(total_partial_buffer);
+typedef std::plus<boost::int64_t> std_plus_type;
+HPX_REGISTER_REDUCE_ACTION_DECLARATION(total_partial_buffer_action, std_plus_type)
+HPX_REGISTER_REDUCE_ACTION(total_partial_buffer_action, std_plus_type)
+
+
 #endif
 
 

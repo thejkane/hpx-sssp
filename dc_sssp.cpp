@@ -51,6 +51,8 @@ boost::int64_t total_useful = 0;
 boost::int64_t total_useless = 0;
 boost::int64_t total_rejected = 0;
 boost::int64_t total_invalidated = 0;
+boost::int64_t total_full_buffers = 0;
+boost::int64_t total_partial_buffers = 0;
 #endif
 
 struct distributed_control {
@@ -592,11 +594,11 @@ void distributed_control::run_dc(vertex_t source) {
     // we do not have a send. Therefore we need add 1 to g_completed
     //g_completed = g_completed + 1;
 
-    //#ifdef PRINT_DEBUG
+#ifdef PRINT_DEBUG
     std::cout << "g_completed : " << g_completed
 	      << " g_active : " << g_active
 	      << std::endl;
-    //#endif
+#endif
     
     if (g_completed != g_active) {
       phase = 1;
@@ -628,22 +630,6 @@ void distributed_control::run_dc(vertex_t source) {
 #ifdef PRINT_DEBUG
   std::cout << "TERMINATION DONE" << std::endl;
   print_results();
-#endif
-
-  if (verify) {
-    verify_results();
-  }
-
-  // collect work stats if enabled
-#ifdef WORK_STATS
-  total_useful = hpx::lcos::reduce<total_useful_work_action>
-      (localities, std::plus<boost::int64_t>()).get();
-  total_useless = hpx::lcos::reduce<total_useless_work_action>
-      (localities, std::plus<boost::int64_t>()).get(); 
-  total_invalidated = hpx::lcos::reduce<total_invalidated_work_action>
-      (localities, std::plus<boost::int64_t>()).get();
-  total_rejected = hpx::lcos::reduce<total_rejected_work_action>
-      (localities, std::plus<boost::int64_t>()).get();  
 #endif
 
 }
@@ -773,6 +759,10 @@ void dc_priority_queue::send(const vertex_distance vd,
     // send coalesced message
     partition_client.coalesced_relax((*iteFind).second);
     (*iteFind).second.clear();
+
+#ifdef WORK_STATS
+    full_buffers++;
+#endif
   }
 }
 
@@ -803,6 +793,10 @@ void dc_priority_queue::send_all() {
       active_count += (*ite).second.size(); // atomic addition
       (*iteClient).second.coalesced_relax((*ite).second);
       (*ite).second.clear();
+
+#ifdef WORK_STATS
+      partial_buffers++;
+#endif
     }
   }
 }
@@ -943,7 +937,9 @@ void print_summary_results(
 			   boost::int64_t cum_useful = 0,
 			   boost::int64_t cum_useless = 0,
 			   boost::int64_t cum_invalidated = 0,
-			   boost::int64_t cum_rejected = 0) {
+			   boost::int64_t cum_rejected = 0,
+			   boost::int64_t cum_full_buffers = 0,
+			   boost::int64_t cum_partial_buffers = 0) {
 
   // calculate avg timing
   all_timing_t::const_iterator ite = all_timings.begin();
@@ -986,6 +982,8 @@ void print_summary_results(
 	    << ", Rejected :" << (cum_rejected / tot_readings)
 	    << ", Rejected/Useful Ratio :" << ((double)cum_rejected / (double)cum_useful)
 	    << ", Invalidated/Useful Ratio :" << ((double)cum_invalidated / (double)cum_useful)
+	    << ", Full buffers (per source) :" << (cum_full_buffers / tot_readings)
+	    << ", Partial buffers (per source) :" << (cum_partial_buffers / tot_readings)
 	    << std::endl;
 #endif
 }
@@ -1057,6 +1055,8 @@ int hpx_main(boost::program_options::variables_map& vm) {
   boost::int64_t cum_total_useless = 0;
   boost::int64_t cum_total_rejected = 0;
   boost::int64_t cum_total_invalidated = 0;
+  boost::int64_t cum_total_full_buffer = 0;
+  boost::int64_t cum_total_partial_buffers = 0;
 #endif
 
 #ifndef DC_TEST_CASE
@@ -1082,11 +1082,16 @@ int hpx_main(boost::program_options::variables_map& vm) {
     // check the total visited count
     boost::uint32_t tot_visited = dc.count_total_visited_vertices();
     // if scale > 10 and total visited is less than 100 ignore the run
-    /*    if (scale > 10 && tot_visited < 100) {
+    if (scale > 10 && tot_visited < 30) {
       std::cout << "decrementing iteration ... " << std::endl;
       --i;
       continue;
-      }*/
+    }
+
+
+    if (verify) {
+      dc.verify_results();
+    }
     
     boost::uint64_t elapsed = after - before;
     std::cout << "Time for distributed control run with scale : " << scale
@@ -1101,17 +1106,39 @@ int hpx_main(boost::program_options::variables_map& vm) {
 	      << " is : " << (elapsed / 1e9) << std::endl;
 
 // work stats
+
+  // collect work stats if enabled
 #ifdef WORK_STATS
+    std::vector<hpx::id_type> localities = hpx::find_all_localities();
+
+    total_useful = hpx::lcos::reduce<total_useful_work_action>
+      (localities, std::plus<boost::int64_t>()).get();
+    total_useless = hpx::lcos::reduce<total_useless_work_action>
+      (localities, std::plus<boost::int64_t>()).get(); 
+    total_invalidated = hpx::lcos::reduce<total_invalidated_work_action>
+      (localities, std::plus<boost::int64_t>()).get();
+    total_rejected = hpx::lcos::reduce<total_rejected_work_action>
+      (localities, std::plus<boost::int64_t>()).get();  
+    total_full_buffers = hpx::lcos::reduce<total_full_buffer_action>
+      (localities, std::plus<boost::int64_t>()).get();  
+    total_partial_buffers = hpx::lcos::reduce<total_partial_buffer_action>
+      (localities, std::plus<boost::int64_t>()).get();  
+
     std::cout << "Work statistics - Useful Work : " << total_useful
 	      << ", Useless Work : " << total_useless
 	      << ", Rejected Work : " << total_rejected
 	      << ", Invalidated Work : " << total_invalidated
+	      << ", Full buffers : " << total_full_buffers
+	      << ", Partial buffers : " << total_partial_buffers
 	      << std::endl;
 
     cum_total_useful += total_useful;
     cum_total_useless += total_useless;
     cum_total_rejected += total_rejected;
     cum_total_invalidated += total_invalidated;
+    cum_total_full_buffer += total_full_buffers;
+    cum_total_partial_buffers += total_partial_buffers;
+
 #endif
 
     all_timings.push_back(elapsed);
@@ -1134,7 +1161,9 @@ int hpx_main(boost::program_options::variables_map& vm) {
 			  cum_total_useful,
 			  cum_total_useless,
 			  cum_total_invalidated,
-			  cum_total_rejected);
+			  cum_total_rejected,
+			  cum_total_full_buffer,
+			  cum_total_partial_buffers);
 #else
     print_summary_results(locs.get(),
 			  num_worker_threads,
@@ -1146,6 +1175,9 @@ int hpx_main(boost::program_options::variables_map& vm) {
 #endif
 
   
+    // clear global partions before finalize
+    global_partitions.clear();
+
     return hpx::finalize();
 }
 
