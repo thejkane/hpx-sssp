@@ -16,7 +16,7 @@
 #ifndef HPX_DC_SSSP
 #define HPX_DC_SSSP
 
-#define WORK_STATS 1
+//#define WORK_STATS 1
 
 // This is needed to increase the number of 
 // parameters to new operator
