@@ -1,2 +1,2 @@
-HPX Component that implements Distributed Control SSSP.
+A graph structure and distributed control Single Source Shortest Paths algorithm implementation for [HPX](https://github.com/STEllAR-GROUP/hpx).
 
